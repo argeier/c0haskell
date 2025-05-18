@@ -3,33 +3,32 @@ module Args (
     validateJob,
 ) where
 
-import Compile (Job (..))
+import Compile (Job (..), src)
 import Error (L1ExceptT, generalFail)
 import System.Directory (doesFileExist)
 
 import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
-import Options.Applicative
+import Options.Applicative (
+    Parser,
+    ParserInfo,
+    argument,
+    fullDesc,
+    header,
+    help,
+    helper,
+    info,
+    metavar,
+    progDesc,
+    str,
+    (<**>),
+ )
 
 jobP :: Parser Job
 jobP =
     Job
         <$> argument str (metavar "INPUT" <> help "Input file to process")
         <*> argument str (metavar "OUTPUT" <> help "Name for the output file")
-        <*> optional
-            ( strOption
-                ( long "ast-out"
-                    <> metavar "AST_FILE"
-                    <> help "Optional file to output the AST to"
-                )
-            )
-        <*> optional
-            ( strOption
-                ( long "aasm-out"
-                    <> metavar "AASM-FILE"
-                    <> help "Optional file to output the AASM to"
-                )
-            )
 
 jobParser :: ParserInfo Job
 jobParser =

@@ -1,55 +1,47 @@
+.intel_syntax noprefix
 .global main
 .global _main
-
 .text
 main:
-call _main
-    pushq %rbp
-    movq %rsp, %rbp
-    call _main
-    movq %rax, %rdi
-    movq $60, %rax
-    syscall
-
+	call _main
+	mov rdi, rax
+	mov rax, 0x3C
+	syscall
 _main:
-pushq %rbp
-movq %rsp, %rbp
-subq $16, %rsp
-# Register allocation begins
-# Register allocation: fromList [(0,PhysReg %rax),(1,PhysReg %rcx),(2,PhysReg %rdx),(3,PhysReg %r10),(4,PhysReg %r11),(5,PhysReg %rbx),(6,PhysReg %r12)]
-movq $105, %rax
-movq $1056, %rcx
-movq %rcx, %rdx
-movq %rax, %rax
-cqto
-idivq %rcx
-movq %r10, %r10
-movq %r10, %rcx
-movq %rdx, %rax
-movq %rcx, %rdx
-movq %rax, %rax
-cqto
-idivq %rcx
-movq %r10, %r11
-movq %r11, %rcx
-movq %rdx, %rax
-movq %rcx, %rdx
-movq %rax, %rax
-cqto
-idivq %rcx
-movq %r10, %rbx
-movq %rbx, %rcx
-movq %rdx, %rax
-movq %rcx, %rdx
-movq %rax, %rax
-cqto
-idivq %rcx
-movq %r10, %r12
-movq %r12, %rcx
-movq %rdx, %rax
-movq %rax, %rax
-# Register allocation ends
-movq %rbp, %rsp
-popq %rbp
-ret
-
+	push rbp
+	mov rbp, rsp
+	sub rsp, 8
+	mov rbx, 2147483646
+	mov rcx, 2
+	mov rdx, 3
+	mov rsi, rcx
+	imul rsi, rdx
+	mov rdi, 3
+	mov r8, rsi
+	imul r8, rdi
+	mov r9, 11
+	mov r10, r8
+	imul r10, r9
+	mov r11, 31
+	mov r12, r10
+	imul r12, r11
+	mov r13, 151
+	mov r14, r12
+	imul r14, r13
+	mov r15, 331
+	mov QWORD PTR [rbp-8], r14
+	push rax
+	mov rax, QWORD PTR [rbp-8]
+	imul rax, r15
+	mov QWORD PTR [rbp-8], rax
+	pop rax
+	push rdx
+	mov rax, rbx
+	cdq
+	idiv QWORD PTR [rbp-8]
+	mov rbx, rax
+	pop rdx
+	mov rax, rbx
+	mov rsp, rbp
+	pop rbp
+	ret

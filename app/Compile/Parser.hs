@@ -190,12 +190,12 @@ hexadecimal = do
     n <- lexeme L.hexadecimal
     if n > maxHex
         then fail $ "Hexadecimal literal out of bounds: " ++ "0x" ++ showHex n ""
-        else return $ toInteger ((fromInteger n) :: Int32)
+        else return $ toInteger (fromInteger n :: Int32)
   where
     maxHex = 0xFFFFFFFF
 
 reserved :: String -> Parser ()
-reserved w = void $ lexeme $ (string w <* notFollowedBy identLetter)
+reserved w = void $ lexeme (string w <* notFollowedBy identLetter)
 
 reservedWords :: [String]
 reservedWords =

@@ -6,7 +6,15 @@ import Compile.AST (AST (..), Expr (..), Stmt (..), posPretty)
 import Compile.Parser (parseNumber)
 import Error (L1ExceptT, semanticFail)
 
-import Control.Monad.State
+import Control.Monad.State (
+    MonadState (get, put),
+    MonadTrans (lift),
+    StateT,
+    evalStateT,
+    execStateT,
+    unless,
+    when,
+ )
 import qualified Data.Map as Map
 
 data VariableStatus

@@ -31,12 +31,10 @@ executable l1c
                   Args,
                   Compile,
                   Compile.AST,
-                  Compile.X86,
-                  Compile.InstructionSelection,
-                  Compile.RegisterAllocation,
                   Compile.Parser,
                   Compile.Semantic,
                   Compile.AAsm,
+                  Compile.X86,
                   Error
     hs-source-dirs:   app
     default-language: Haskell2010
