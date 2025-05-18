@@ -11,6 +11,7 @@ import Control.Monad.Combinators.Expr (
     makeExprParser,
  )
 import Control.Monad.IO.Class (liftIO)
+import Data.Char (isAlpha, isAlphaNum, isAscii)
 import Data.Functor (void)
 import Data.Int (Int32)
 import Data.Void (Void)
@@ -20,23 +21,22 @@ import Text.Megaparsec (
     MonadParsec (eof, notFollowedBy, try),
     Parsec,
     between,
+    choice,
     chunk,
     errorBundlePretty,
     getSourcePos,
     many,
     oneOf,
     parse,
+    satisfy,
     some,
     (<?>),
     (<|>),
  )
 import Text.Megaparsec.Char (
-    alphaNumChar,
     char,
     digitChar,
     hexDigitChar,
-    letterChar,
-    space1,
     string,
  )
 import qualified Text.Megaparsec.Char.Lexer as L
@@ -56,6 +56,21 @@ parseNumber s = do
 
 type Parser = Parsec Void String
 
+-- Custom whitespace parser that only accepts specific whitespace characters
+whitespaceChar :: Parser Char
+whitespaceChar =
+    choice
+        [ -- Only allow space, tab, newline, carriage return
+          char ' '
+        , char '\t'
+        , char '\n'
+        , char '\r'
+        ]
+        <?> "whitespace character"
+
+whitespace :: Parser ()
+whitespace = void $ some whitespaceChar
+
 astParser :: Parser AST
 astParser = do
     sc
@@ -67,6 +82,7 @@ astParser = do
         pos <- getSourcePos
         stmts <- many stmt
         return $ Block stmts pos
+    sc -- Consume trailing whitespace
     eof
     return mainBlock
 
@@ -159,7 +175,7 @@ expr = makeExprParser expr' opTable <?> "expression"
 
 -- Lexer starts here, probably worth moving to its own file at some point
 sc :: Parser ()
-sc = L.space space1 lineComment blockComment
+sc = L.space whitespace lineComment blockComment
   where
     lineComment = L.skipLineComment "//"
     blockComment = L.skipBlockCommentNested "/*" "*/"
@@ -198,7 +214,7 @@ number = try hexadecimal <|> decimal <?> "number"
 decimal :: Parser Integer
 decimal = do
     n <- lexeme L.decimal
-    notFollowedBy alphaNumChar
+    notFollowedBy asciiAlphaNumChar
     if n < maxInt
         then return n
         else
@@ -256,12 +272,19 @@ opLetter = oneOf "=&|<>"
 operator :: Parser String
 operator = lexeme ((:) <$> opStart <*> many opLetter)
 
+-- ASCII-only character parsers
+asciiLetterChar :: Parser Char
+asciiLetterChar = satisfy (\c -> isAscii c && isAlpha c) <?> "ASCII letter"
+
+asciiAlphaNumChar :: Parser Char
+asciiAlphaNumChar = satisfy (\c -> isAscii c && isAlphaNum c) <?> "ASCII letter or digit"
+
 -- Identifiers
 identStart :: Parser Char
-identStart = letterChar <|> char '_'
+identStart = asciiLetterChar <|> char '_'
 
 identLetter :: Parser Char
-identLetter = alphaNumChar <|> char '_'
+identLetter = asciiAlphaNumChar <|> char '_'
 
 identifier :: Parser String
 identifier = (lexeme . try) (p >>= check)

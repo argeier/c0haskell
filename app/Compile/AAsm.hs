@@ -61,7 +61,53 @@ emit :: String -> CodeGen ()
 emit instr = modify $ \s -> s{code = code s ++ [instr]}
 
 genBlock :: [Stmt] -> CodeGen ()
-genBlock = mapM_ genStmt
+genBlock [] = return ()
+genBlock (stmt : rest) = do
+    isReturn <- genStmt stmt
+    if isReturn
+        then return ()
+        else genBlock rest
+
+genStmt :: Stmt -> CodeGen Bool
+genStmt (Decl name _) = do
+    freshReg >>= assignVar name
+    return False
+genStmt (Init name e _) = do
+    me <- constEval e
+    r <- freshReg
+    case me of
+        Just v -> do
+            emit $ regName r ++ " = " ++ show v
+            assignVar name r
+            bindConst name v
+        Nothing -> do
+            r' <- genExpr e
+            assignVar name r'
+            clearConst name
+    return False
+genStmt (Asgn name Nothing e _) = do
+    me <- constEval e
+    r <- freshReg
+    case me of
+        Just v -> do
+            emit $ regName r ++ " = " ++ show v
+            assignVar name r
+            bindConst name v
+        Nothing -> do
+            r' <- genExpr e
+            assignVar name r'
+            clearConst name
+    return False
+genStmt (Asgn name (Just op) e _) = do
+    r' <- genExpr e
+    lhs <- lookupVar name
+    emit $ regName lhs ++ " " ++ show op ++ "= " ++ regName r'
+    clearConst name
+    return False
+genStmt (Ret e _) = do
+    r <- genExpr e
+    emit ("ret " ++ regName r)
+    return True
 
 toInt32 :: Integer -> Integer
 toInt32 x =
@@ -84,8 +130,8 @@ constEval (BinExpr op l r) = do
     return $ case (ml, mr) of
         (Just v1, Just v2) ->
             case op of
-                Div | v2 == 0 -> Nothing -- Skip constant folding for division by zero
-                Mod | v2 == 0 -> Nothing -- Skip constant folding for modulo by zero
+                Div | v2 == 0 -> Nothing
+                Mod | v2 == 0 -> Nothing
                 _ ->
                     let raw = case op of
                             Add -> v1 + v2
@@ -97,39 +143,6 @@ constEval (BinExpr op l r) = do
                         res = toInt32 raw
                      in Just res
         _ -> Nothing
-
-genStmt :: Stmt -> CodeGen ()
-genStmt (Decl name _) = freshReg >>= assignVar name
-genStmt (Init name e _) = do
-    me <- constEval e
-    r <- freshReg
-    case me of
-        Just v -> do
-            emit $ regName r ++ " = " ++ show v
-            assignVar name r
-            bindConst name v
-        Nothing -> do
-            r' <- genExpr e
-            assignVar name r'
-            clearConst name
-genStmt (Asgn name Nothing e _) = do
-    me <- constEval e
-    r <- freshReg
-    case me of
-        Just v -> do
-            emit $ regName r ++ " = " ++ show v
-            assignVar name r
-            bindConst name v
-        Nothing -> do
-            r' <- genExpr e
-            assignVar name r'
-            clearConst name
-genStmt (Asgn name (Just op) e _) = do
-    r' <- genExpr e
-    lhs <- lookupVar name
-    emit $ regName lhs ++ " " ++ show op ++ "= " ++ regName r'
-    clearConst name
-genStmt (Ret e _) = genExpr e >>= \r -> emit ("ret " ++ regName r)
 
 genExpr :: Expr -> CodeGen Register
 genExpr (IntExpr s _) =
