@@ -9,11 +9,11 @@ import Options.Applicative (execParser)
 
 main :: IO ()
 main = do
-  input <- execParser jobParser
-  result <-
-    runExceptT $ do
-      job <- validateJob input
-      compile job
-  case result of
-    Left err -> dieWithError err
-    Right () -> return ()
+    input <- execParser jobParser
+    result <-
+        runExceptT $ do
+            job <- validateJob input
+            compile job
+    case result of
+        Left err -> dieWithError err
+        Right () -> return ()

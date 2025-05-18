@@ -1,14 +1,14 @@
-module Error
-  ( L1ExceptT
-  , generalFail
-  , parserFail
-  , semanticFail
-  , dieWithError
-  ) where
+module Error (
+    L1ExceptT,
+    generalFail,
+    parserFail,
+    semanticFail,
+    dieWithError,
+) where
 
-import           Control.Monad.Except (ExceptT, throwError)
+import Control.Monad.Except (ExceptT, throwError)
 import qualified System.Exit as Exit
-import           System.IO (hPutStrLn, stderr)
+import System.IO (hPutStrLn, stderr)
 
 -- Predefined exit codes signaling compiler status
 parserErrorCode :: Int
@@ -19,10 +19,10 @@ semanticErrorCode = 7
 
 -- Error message and exit code
 data L1Error
-  = Error String Int
-  | ParserError String
-  | SemanticError String
-  deriving (Show)
+    = Error String Int
+    | ParserError String
+    | SemanticError String
+    deriving (Show)
 
 type L1ExceptT = ExceptT L1Error IO
 
@@ -39,7 +39,7 @@ semanticFail = throwError . SemanticError
 -- Exit with an error message and a return code
 dieWithError :: L1Error -> IO ()
 dieWithError (Error msg code) = do
-  hPutStrLn stderr msg
-  Exit.exitWith $ Exit.ExitFailure code
+    hPutStrLn stderr msg
+    Exit.exitWith $ Exit.ExitFailure code
 dieWithError (ParserError msg) = dieWithError (Error msg parserErrorCode)
 dieWithError (SemanticError msg) = dieWithError (Error msg semanticErrorCode)

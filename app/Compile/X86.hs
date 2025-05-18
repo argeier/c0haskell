@@ -2,11 +2,18 @@ module Compile.X86 (
     generateX86,
 ) where
 
-import Control.Monad.State
+import Control.Monad.State (
+    MonadState (get, put),
+    State,
+    execState,
+    modify,
+    unless,
+    when,
+ )
 import Data.Char (isDigit)
 import Data.List (intercalate, isPrefixOf)
 import qualified Data.Map as Map
-import Text.Printf
+import Text.Printf (printf)
 
 data Operand
     = Reg String

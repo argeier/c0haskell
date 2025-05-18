@@ -6,15 +6,39 @@ module Compile.Parser (
 import Compile.AST (AST (..), Expr (..), Op (..), Stmt (..))
 import Error (L1ExceptT, parserFail)
 
-import Control.Monad.Combinators.Expr
+import Control.Monad.Combinators.Expr (
+    Operator (InfixL, Prefix),
+    makeExprParser,
+ )
 import Control.Monad.IO.Class (liftIO)
 import Data.Functor (void)
 import Data.Int (Int32)
 import Data.Void (Void)
 import Numeric (showHex)
 
-import Text.Megaparsec
-import Text.Megaparsec.Char
+import Text.Megaparsec (
+    MonadParsec (eof, notFollowedBy, try),
+    Parsec,
+    between,
+    chunk,
+    errorBundlePretty,
+    getSourcePos,
+    many,
+    oneOf,
+    parse,
+    some,
+    (<?>),
+    (<|>),
+ )
+import Text.Megaparsec.Char (
+    alphaNumChar,
+    char,
+    digitChar,
+    hexDigitChar,
+    letterChar,
+    space1,
+    string,
+ )
 import qualified Text.Megaparsec.Char.Lexer as L
 
 parseAST :: FilePath -> L1ExceptT AST
