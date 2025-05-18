@@ -83,15 +83,19 @@ constEval (BinExpr op l r) = do
     mr <- constEval r
     return $ case (ml, mr) of
         (Just v1, Just v2) ->
-            let raw = case op of
-                    Add -> v1 + v2
-                    Sub -> v1 - v2
-                    Mul -> v1 * v2
-                    Div -> v1 `quot` v2
-                    Mod -> v1 `rem` v2
-                    _ -> error "unsupported op in constant evaluation"
-                res = toInt32 raw
-             in Just res
+            case op of
+                Div | v2 == 0 -> Nothing -- Skip constant folding for division by zero
+                Mod | v2 == 0 -> Nothing -- Skip constant folding for modulo by zero
+                _ ->
+                    let raw = case op of
+                            Add -> v1 + v2
+                            Sub -> v1 - v2
+                            Mul -> v1 * v2
+                            Div -> v1 `quot` v2
+                            Mod -> v1 `rem` v2
+                            _ -> error "unsupported op in constant evaluation"
+                        res = toInt32 raw
+                     in Just res
         _ -> Nothing
 
 genStmt :: Stmt -> CodeGen ()
