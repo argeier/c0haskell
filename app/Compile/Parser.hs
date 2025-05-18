@@ -204,7 +204,7 @@ decLiteral = string "0" <|> (:) <$> oneOf ['1' .. '9'] <*> many digitChar
 
 hexLiteral :: Parser String
 hexLiteral = do
-    void $ (chunk "0x" <|> chunk "0X")
+    void (chunk "0x" <|> chunk "0X")
     digits <- some hexDigitChar
     return ("0x" ++ digits)
 
