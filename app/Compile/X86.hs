@@ -224,26 +224,31 @@ emitBinaryFinal :: String -> Operand -> Operand -> Operand -> RegAlloc ()
 emitBinaryFinal opName destOp src1Op src2Op =
     if opName == "imul"
         then case (destOp, src1Op, src2Op) of
-            (Reg dr, Reg s1r, Imm s2i) -> emit' "imul" [Reg dr, Reg s1r, Imm s2i]
-            (Reg dr, Mem s1m, Imm s2i) -> emit' "imul" [Reg dr, Mem s1m, Imm s2i]
-            _ -> fallthroughToTwoOperand
+            (Reg dReg, Reg s1Reg, Imm imm) ->
+                emit' "imul" [Reg dReg, Reg s1Reg, Imm imm]
+            (Reg dReg, Mem s1Mem, Imm imm) ->
+                emit' "imul" [Reg dReg, Mem s1Mem, Imm imm]
+            _ -> generateTwoOperandSequence
         else
-            fallthroughToTwoOperand
+            generateTwoOperandSequence
   where
-    fallthroughToTwoOperand = do
-        when (destOp /= src1Op) $ emitMove destOp src1Op
-        case (destOp, src2Op) of
-            (Reg _, Reg _) -> emit' opName [destOp, src2Op]
-            (Reg _, Mem _) -> emit' opName [destOp, src2Op]
-            (Reg _, Imm _) -> emit' opName [destOp, src2Op]
-            (Mem _, Reg _) -> emit' opName [destOp, src2Op]
-            (Mem _, Imm _) -> emit' opName [destOp, src2Op]
-            (Mem _, Mem _) -> do
-                emit "\tpush rax"
-                emitMove (Reg "rax") src2Op
-                emit' opName [destOp, Reg "rax"]
-                emit "\tpop rax"
-            _ -> error $ "emitBinaryFinal: Unsupported combination for " ++ opName ++ " " ++ show destOp ++ ", " ++ show src2Op
+    generateTwoOperandSequence = do
+        let calcReg = case destOp of
+                Reg _ -> destOp
+                _ -> Reg "rax"
+
+        when (calcReg /= src1Op) $
+            emitMove calcReg src1Op
+        case src2Op of
+            Reg _ -> emit' opName [calcReg, src2Op]
+            Mem _ -> emit' opName [calcReg, src2Op]
+            Imm _ -> emit' opName [calcReg, src2Op]
+
+        case destOp of
+            Mem _ ->
+                when (calcReg == Reg "rax") $
+                    emitMove destOp (Reg "rax")
+            _ -> return ()
 
 trim :: String -> String
 trim = dropWhile (== ' ') . reverse . dropWhile (== ' ') . reverse

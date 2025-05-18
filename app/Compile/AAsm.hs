@@ -142,11 +142,9 @@ constEval (BinExpr op l r) = do
                             Just $ toInt32 (v1 `quot` v2)
                 Mod ->
                     if v2 == 0
-                        then Nothing -- Modulo by zero
-                        -- For INT_MIN % -1, C standard result is 0.
-                        -- Haskell's `rem` for (-2147483648) (-1) is 0. toInt32 handles it.
+                        then Nothing
                         else Just $ toInt32 (v1 `rem` v2)
-                _ -> error "unsupported binary op in constant evaluation" -- Should not be reached
+                _ -> error "unsupported binary op in constant evaluation"
         _ -> Nothing
 
 genExpr :: Expr -> CodeGen Register
