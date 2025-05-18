@@ -12,9 +12,10 @@ import Control.Monad.State (
     StateT,
     evalStateT,
     execStateT,
-    unless,
-    when,
  )
+
+import Control.Monad (unless, when)
+
 import qualified Data.Map as Map
 
 data VariableStatus

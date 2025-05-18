@@ -2,13 +2,12 @@ module Compile.X86 (
     generateX86,
 ) where
 
+import Control.Monad (unless, when)
 import Control.Monad.State (
     MonadState (get, put),
     State,
     execState,
     modify,
-    unless,
-    when,
  )
 import Data.Char (isDigit)
 import Data.List (intercalate, isPrefixOf)
