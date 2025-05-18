@@ -18,14 +18,22 @@ import Control.Monad.IO.Class
 data Job = Job
     { src :: FilePath
     , out :: FilePath
+    , astOut :: Maybe FilePath
+    , aasmOut :: Maybe FilePath
     }
     deriving (Show)
 
 compile :: Job -> L1ExceptT ()
 compile job = do
     ast <- parseAST $ src job
+    case astOut job of
+        Just astFile -> liftIO $ writeFile astFile (show ast)
+        Nothing -> return ()
     semanticAnalysis ast
     let aasm = codeGen ast
+    case aasmOut job of
+        Just aasmFile -> liftIO $ writeFile aasmFile (unlines aasm)
+        Nothing -> return ()
     let x86code = generateX86 aasm
     let asmFile = replaceExtension (out job) "s"
     liftIO $ writeFile asmFile (unlines x86code)

@@ -18,9 +18,12 @@ import Options.Applicative (
     help,
     helper,
     info,
+    long,
     metavar,
+    optional,
     progDesc,
     str,
+    strOption,
     (<**>),
  )
 
@@ -29,6 +32,20 @@ jobP =
     Job
         <$> argument str (metavar "INPUT" <> help "Input file to process")
         <*> argument str (metavar "OUTPUT" <> help "Name for the output file")
+        <*> optional
+            ( strOption
+                ( long "dump-ast"
+                    <> metavar "AST_OUTPUT"
+                    <> help "Dump AST to this file"
+                )
+            )
+        <*> optional
+            ( strOption
+                ( long "dump-aasm"
+                    <> metavar "AASM_OUTPUT"
+                    <> help "Dump abstract assembly to this file"
+                )
+            )
 
 jobParser :: ParserInfo Job
 jobParser =
