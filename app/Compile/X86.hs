@@ -2,7 +2,7 @@ module Compile.X86 (
     generateX86,
 ) where
 
-import Control.Monad (unless, when)
+import Control.Monad (when)
 import Control.Monad.State (
     MonadState (get, put),
     State,
@@ -20,9 +20,28 @@ data Operand
     | Imm String
     deriving (Show, Eq)
 
+to32BitRegName :: String -> String
+to32BitRegName "rax" = "eax"
+to32BitRegName "rbx" = "ebx"
+to32BitRegName "rcx" = "ecx"
+to32BitRegName "rdx" = "edx"
+to32BitRegName "rsi" = "esi"
+to32BitRegName "rdi" = "edi"
+to32BitRegName "r8" = "r8d"
+to32BitRegName "r9" = "r9d"
+to32BitRegName "r10" = "r10d"
+to32BitRegName "r11" = "r11d"
+to32BitRegName "r12" = "r12d"
+to32BitRegName "r13" = "r13d"
+to32BitRegName "r14" = "r14d"
+to32BitRegName "r15" = "r15d"
+to32BitRegName "rbp" = "ebp"
+to32BitRegName "rsp" = "esp"
+to32BitRegName other = other
+
 showOperand :: Operand -> String
-showOperand (Reg r) = r
-showOperand (Mem m) = printf "QWORD PTR %s" m
+showOperand (Reg r) = to32BitRegName r
+showOperand (Mem m) = printf "DWORD PTR %s" m
 showOperand (Imm i) = i
 
 data RegState = RegState
@@ -47,7 +66,9 @@ generateX86 :: [String] -> [String]
 generateX86 aasm = [".intel_syntax noprefix"] ++ prologue ++ body ++ epilogue
   where
     finalState = execState (processAAsmInstructions aasm) initialState
-    stackSize = stackSlots finalState
+    stackRequiredBytes = stackSlots finalState * 8
+    alignedStackBytes = if stackRequiredBytes > 0 then ((stackRequiredBytes + 15) `div` 16) * 16 else 0
+
     body = reverse $ instructions finalState
 
     prologue =
@@ -55,20 +76,20 @@ generateX86 aasm = [".intel_syntax noprefix"] ++ prologue ++ body ++ epilogue
         , ".text"
         , "main:"
         , "\tcall _main"
-        , "\tmov rdi, rax"
+        , "\tmov edi, eax"
         , "\tmov rax, 60"
         , "\tsyscall"
         , "_main:"
         , "\tpush rbp"
         , "\tmov rbp, rsp"
         ]
-            ++ ([printf "\tsub rsp, %d" (8 * stackSize) | stackSize > 0])
+            ++ ([printf "\tsub rsp, %d" alignedStackBytes | alignedStackBytes > 0])
 
     epilogue =
-        [ "\tmov rsp, rbp"
-        , "\tpop rbp"
-        , "\tret"
-        ]
+        ([printf "\tadd rsp, %d" alignedStackBytes | alignedStackBytes > 0])
+            ++ [ "\tpop rbp"
+               , "\tret"
+               ]
 
 emit :: String -> RegAlloc ()
 emit instr = modify $ \s -> s{instructions = instr : instructions s}
@@ -86,8 +107,8 @@ getOperand tempNameStr = do
         Just operand -> return operand
         Nothing -> do
             case freeRegs st of
-                (reg : regs) -> do
-                    let newOperand = Reg reg
+                (reg64Name : regs) -> do
+                    let newOperand = Reg reg64Name
                     put st{regMap = Map.insert tempNameStr newOperand (regMap st), freeRegs = regs}
                     return newOperand
                 [] -> do
@@ -136,90 +157,93 @@ processAAsmInstruction instr
 processBinOp :: Operand -> Operand -> String -> Operand -> RegAlloc ()
 processBinOp destOp src1Op opStr actualSrc2Op =
     case opStr of
-        "+" -> emitBinary "add" destOp src1Op actualSrc2Op
-        "-" -> emitBinary "sub" destOp src1Op actualSrc2Op
-        "*" -> emitBinary "imul" destOp src1Op actualSrc2Op
+        "+" -> emitBinaryFinal "add" destOp src1Op actualSrc2Op
+        "-" -> emitBinaryFinal "sub" destOp src1Op actualSrc2Op
+        "*" -> emitBinaryFinal "imul" destOp src1Op actualSrc2Op
         "/" -> do
-            emitMove (Reg "rax") src1Op
-            let divisorFinalOp = actualSrc2Op
-            when (divisorFinalOp == Reg "rax" || divisorFinalOp == Reg "rdx") $
-                error $
-                    "Division divisor " ++ show divisorFinalOp ++ " conflicts with rax/rdx usage."
-
             emit "\tpush rdx"
-            emit "\tcqo"
-            emitDivIdiv divisorFinalOp
+            emitMove (Reg "rax") src1Op
+
+            let prepareDivisor = case actualSrc2Op of
+                    Reg rName | rName == "rax" || rName == "rdx" -> do
+                        emitMove (Reg "rcx") actualSrc2Op
+                        return (Reg "rcx")
+                    Reg _ -> return actualSrc2Op
+                    Mem _ -> return actualSrc2Op
+                    Imm _ -> do
+                        emitMove (Reg "rcx") actualSrc2Op
+                        return (Reg "rcx")
+
+            divisorOp <- prepareDivisor
+            emit "\tcdq"
+            emit' "idiv" [divisorOp]
             emitMove destOp (Reg "rax")
             emit "\tpop rdx"
         "%" -> do
-            emitMove (Reg "rax") src1Op
-            let divisorFinalOp = actualSrc2Op
-            when (divisorFinalOp == Reg "rax" || divisorFinalOp == Reg "rdx") $
-                error $
-                    "Modulus divisor " ++ show divisorFinalOp ++ " conflicts with rax/rdx usage for idiv."
-
             emit "\tpush rdx"
+            emitMove (Reg "rax") src1Op
+            let prepareDivisor = case actualSrc2Op of
+                    Reg rName | rName == "rax" || rName == "rdx" -> do
+                        emitMove (Reg "rcx") actualSrc2Op
+                        return (Reg "rcx")
+                    Reg _ -> return actualSrc2Op
+                    Mem _ -> return actualSrc2Op
+                    Imm _ -> do
+                        emitMove (Reg "rcx") actualSrc2Op
+                        return (Reg "rcx")
+
+            divisorOp <- prepareDivisor
             emit "\tcdq"
-            emitDivIdiv divisorFinalOp
+            emit' "idiv" [divisorOp]
+
             emitMove destOp (Reg "rdx")
             emit "\tpop rdx"
         _ -> error $ "Unsupported binary AAsm operator: " ++ opStr
 
 emitMove :: Operand -> Operand -> RegAlloc ()
-emitMove dest@(Reg _) src@(Imm _) = emit' "mov" [dest, src]
-emitMove dest@(Mem _) src@(Imm _) = emit' "mov" [dest, src]
-emitMove dest@(Reg destReg) src@(Reg srcReg)
-    | destReg == srcReg = return ()
+emitMove dest@(Reg destReg64) src@(Reg srcReg64)
+    | destReg64 == srcReg64 = return ()
     | otherwise = emit' "mov" [dest, src]
+emitMove dest@(Reg _) src@(Imm _) = emit' "mov" [dest, src]
 emitMove dest@(Reg _) src@(Mem _) = emit' "mov" [dest, src]
 emitMove dest@(Mem _) src@(Reg _) = emit' "mov" [dest, src]
-emitMove dest@(Mem _) src@(Mem _) = do
-    emit "\tpush rax"
-    emit' "mov" [Reg "rax", src]
-    emit' "mov" [dest, Reg "rax"]
-    emit "\tpop rax"
+emitMove dest@(Mem _) src@(Imm _) = emit' "mov" [dest, src]
+emitMove dest@(Mem destMem) src@(Mem srcMem)
+    | destMem == srcMem = return ()
+    | otherwise = do
+        emit "\tpush rax"
+        emit' "mov" [Reg "rax", src]
+        emit' "mov" [dest, Reg "rax"]
+        emit "\tpop rax"
 emitMove d s = error $ "Unsupported move combination: " ++ show d ++ " <- " ++ show s
 
 emitUnaryOp :: String -> Operand -> RegAlloc ()
-emitUnaryOp op destOp = emit' op [destOp]
+emitUnaryOp opCode operand = emit' opCode [operand]
 
-emitBinary :: String -> Operand -> Operand -> Operand -> RegAlloc ()
-emitBinary opName destOp src1Op src2Op = do
+emitBinaryFinal :: String -> Operand -> Operand -> Operand -> RegAlloc ()
+emitBinaryFinal opName destOp src1Op src2Op =
     if opName == "imul"
-        then do
-            emit "\tpush rax"
-            emit "\tpush rdx"
-
-            emitMove (Reg "rax") src1Op
-
-            case src2Op of
-                Imm _ -> emit' "imul" [Reg "rax", src2Op]
-                Reg _ -> emit' "imul" [Reg "rax", src2Op]
-                Mem _ -> emit' "imul" [Reg "rax", src2Op]
-
-            emitMove destOp (Reg "rax")
-
-            emit "\tpop rdx"
-            emit "\tpop rax"
-        else do
-            unless (destOp == src1Op) $ do
-                emitMove destOp src1Op
-
-            case (destOp, src2Op) of
-                (Reg _, Reg _) -> emit' opName [destOp, src2Op]
-                (Reg _, Mem _) -> emit' opName [destOp, src2Op]
-                (Mem _, Reg _) -> emit' opName [destOp, src2Op]
-                (Mem _, Mem _) -> do
-                    emit "\tpush rax"
-                    emitMove (Reg "rax") src2Op
-                    emit' opName [destOp, Reg "rax"]
-                    emit "\tpop rax"
-                (Mem _, Imm _) -> emit' opName [destOp, src2Op]
-                (Reg _, Imm _) -> emit' opName [destOp, src2Op]
-                _ -> error $ "Unsupported binary operand combination for " ++ opName ++ ": " ++ show destOp ++ ", " ++ show src2Op
-
-emitDivIdiv :: Operand -> RegAlloc ()
-emitDivIdiv divisorOp = emit' "idiv" [divisorOp]
+        then case (destOp, src1Op, src2Op) of
+            (Reg dr, Reg s1r, Imm s2i) -> emit' "imul" [Reg dr, Reg s1r, Imm s2i]
+            (Reg dr, Mem s1m, Imm s2i) -> emit' "imul" [Reg dr, Mem s1m, Imm s2i]
+            _ -> fallthroughToTwoOperand
+        else
+            fallthroughToTwoOperand
+  where
+    fallthroughToTwoOperand = do
+        when (destOp /= src1Op) $ emitMove destOp src1Op
+        case (destOp, src2Op) of
+            (Reg _, Reg _) -> emit' opName [destOp, src2Op]
+            (Reg _, Mem _) -> emit' opName [destOp, src2Op]
+            (Reg _, Imm _) -> emit' opName [destOp, src2Op]
+            (Mem _, Reg _) -> emit' opName [destOp, src2Op]
+            (Mem _, Imm _) -> emit' opName [destOp, src2Op]
+            (Mem _, Mem _) -> do
+                emit "\tpush rax"
+                emitMove (Reg "rax") src2Op
+                emit' opName [destOp, Reg "rax"]
+                emit "\tpop rax"
+            _ -> error $ "emitBinaryFinal: Unsupported combination for " ++ opName ++ " " ++ show destOp ++ ", " ++ show src2Op
 
 trim :: String -> String
 trim = dropWhile (== ' ') . reverse . dropWhile (== ' ') . reverse

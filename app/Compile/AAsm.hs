@@ -114,6 +114,7 @@ toInt32 x =
     let w = x .&. 0xffffffff
      in if w >= 0x80000000 then w - 0x100000000 else w
 
+-- In AAsm.hs
 constEval :: Expr -> CodeGen (Maybe Integer)
 constEval (IntExpr s _) =
     case parseNumber s of
@@ -123,25 +124,29 @@ constEval (Ident name _) = gets (Map.lookup name . constMap)
 constEval (UnExpr Neg e) = do
     me <- constEval e
     return (toInt32 . negate <$> me)
-constEval (UnExpr _ _) = return Nothing
+constEval (UnExpr _ _) = return Nothing -- Other unary ops not const-evaluable or don't exist
 constEval (BinExpr op l r) = do
     ml <- constEval l
     mr <- constEval r
     return $ case (ml, mr) of
         (Just v1, Just v2) ->
             case op of
-                Div | v2 == 0 -> Nothing
-                Mod | v2 == 0 -> Nothing
-                _ ->
-                    let raw = case op of
-                            Add -> v1 + v2
-                            Sub -> v1 - v2
-                            Mul -> v1 * v2
-                            Div -> v1 `quot` v2
-                            Mod -> v1 `rem` v2
-                            _ -> error "unsupported op in constant evaluation"
-                        res = toInt32 raw
-                     in Just res
+                Add -> Just $ toInt32 (v1 + v2)
+                Sub -> Just $ toInt32 (v1 - v2)
+                Mul -> Just $ toInt32 (v1 * v2)
+                Div ->
+                    if (v2 == 0) || (v1 == (-(2 ^ (31 :: Integer))) && v2 == -1)
+                        then
+                            Nothing
+                        else
+                            Just $ toInt32 (v1 `quot` v2)
+                Mod ->
+                    if v2 == 0
+                        then Nothing -- Modulo by zero
+                        -- For INT_MIN % -1, C standard result is 0.
+                        -- Haskell's `rem` for (-2147483648) (-1) is 0. toInt32 handles it.
+                        else Just $ toInt32 (v1 `rem` v2)
+                _ -> error "unsupported binary op in constant evaluation" -- Should not be reached
         _ -> Nothing
 
 genExpr :: Expr -> CodeGen Register
