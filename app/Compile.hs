@@ -13,7 +13,7 @@ import System.FilePath (replaceExtension)
 import System.Process (system)
 
 import Control.Monad (when)
-import Control.Monad.IO.Class
+import Control.Monad.IO.Class (MonadIO (liftIO))
 
 data Job = Job
     { src :: FilePath
@@ -37,6 +37,5 @@ compile job = do
     let x86code = generateX86 aasm
     let asmFile = replaceExtension (out job) "s"
     liftIO $ writeFile asmFile (unlines x86code)
-    -- Assemble and link using gcc
     exitCode <- liftIO $ system $ "gcc " ++ asmFile ++ " -o " ++ out job
     when (exitCode /= ExitSuccess) $ generalFail "Assembly or linking failed" 1

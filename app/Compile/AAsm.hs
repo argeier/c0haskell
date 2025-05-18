@@ -6,17 +6,13 @@ import Compile.AST (AST (..), Expr (..), Op (..), Stmt (..))
 import Compile.Parser (parseNumber)
 
 import Control.Monad.State (State, execState, get, gets, modify, put)
-import Data.Bits ((.&.)) -- for 32-bit wrapping
+import Data.Bits ((.&.))
 import qualified Data.Map as Map
 
 type Register = Integer
 type VarName = String
 
--- AAsm register allocation and constant environment
--- so we can fold qualified expressions with correct 32-bit semantics
-
 type AAsmAlloc = Map.Map VarName Register
-
 type ConstEnv = Map.Map VarName Integer
 
 data CodeGenState = CodeGenState
@@ -28,11 +24,10 @@ data CodeGenState = CodeGenState
 
 type CodeGen a = State CodeGenState a
 
--- Entry point: start with empty maps\ ncodeGen :: AST -> [String]
+codeGen :: AST -> [String]
 codeGen (Block stmts _) =
     code $ execState (genBlock stmts) (CodeGenState Map.empty Map.empty 0 [])
 
--- Helpers
 regName :: Register -> String
 regName n = "%" ++ show n
 
@@ -68,13 +63,11 @@ emit instr = modify $ \s -> s{code = code s ++ [instr]}
 genBlock :: [Stmt] -> CodeGen ()
 genBlock = mapM_ genStmt
 
--- Simulate C99 32-bit signed overflow semantics
 toInt32 :: Integer -> Integer
 toInt32 x =
     let w = x .&. 0xffffffff
      in if w >= 0x80000000 then w - 0x100000000 else w
 
--- Try constant-folding with correct 32-bit wrap
 constEval :: Expr -> CodeGen (Maybe Integer)
 constEval (IntExpr s _) =
     case parseNumber s of
@@ -84,6 +77,7 @@ constEval (Ident name _) = gets (Map.lookup name . constMap)
 constEval (UnExpr Neg e) = do
     me <- constEval e
     return (toInt32 . negate <$> me)
+constEval (UnExpr _ _) = return Nothing
 constEval (BinExpr op l r) = do
     ml <- constEval l
     mr <- constEval r
@@ -100,7 +94,6 @@ constEval (BinExpr op l r) = do
              in Just res
         _ -> Nothing
 
--- Statement codegen
 genStmt :: Stmt -> CodeGen ()
 genStmt (Decl name _) = freshReg >>= assignVar name
 genStmt (Init name e _) = do
@@ -128,14 +121,12 @@ genStmt (Asgn name Nothing e _) = do
             assignVar name r'
             clearConst name
 genStmt (Asgn name (Just op) e _) = do
-    -- compound ops: clear any const assumption
     r' <- genExpr e
     lhs <- lookupVar name
     emit $ regName lhs ++ " " ++ show op ++ "= " ++ regName r'
     clearConst name
 genStmt (Ret e _) = genExpr e >>= \r -> emit ("ret " ++ regName r)
 
--- Expression codegen (fallback)
 genExpr :: Expr -> CodeGen Register
 genExpr (IntExpr s _) =
     case parseNumber s of
