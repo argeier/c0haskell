@@ -1,0 +1,1794 @@
+
+
+===== FILE: app/Main.hs =====
+
+module Main where
+
+import Args (jobParser, validateJob)
+import Compile (compile)
+import Error (dieWithError)
+
+import Control.Monad.Except (runExceptT)
+import Options.Applicative (execParser)
+
+main :: IO ()
+main = do
+  input <- execParser jobParser
+  result <-
+    runExceptT $ do
+      job <- validateJob input
+      compile job
+  case result of
+    Left err -> dieWithError err
+    Right () -> return ()
+
+
+===== FILE: app/Args.hs =====
+
+module Args (
+    jobParser,
+    validateJob,
+) where
+
+import Compile (Job (..))
+import Error (L1ExceptT, generalFail)
+import System.Directory (doesFileExist)
+
+import Control.Monad (unless)
+import Control.Monad.IO.Class (liftIO)
+import Options.Applicative
+
+jobP :: Parser Job
+jobP =
+    Job
+        <$> argument str (metavar "INPUT" <> help "Input file to process")
+        <*> argument str (metavar "OUTPUT" <> help "Name for the output file")
+        <*> optional
+            ( strOption
+                ( long "ast-out"
+                    <> metavar "AST_FILE"
+                    <> help "Optional file to output the AST to"
+                )
+            )
+        <*> optional
+            ( strOption
+                ( long "aasm-out"
+                    <> metavar "AASM-FILE"
+                    <> help "Optional file to output the AASM to"
+                )
+            )
+
+jobParser :: ParserInfo Job
+jobParser =
+    info
+        (jobP <**> helper)
+        ( fullDesc
+            <> progDesc "Compile L1 programs to a simple abstract assembly language"
+            <> header "An simple starter compiler for the L1 language"
+        )
+
+validateJob :: Job -> L1ExceptT Job
+validateJob job = do
+    let sourceFile = src job
+    exists <- liftIO $ doesFileExist sourceFile
+    unless exists $ generalFail ("File " ++ sourceFile ++ " does not exist :(") 1
+    return job
+
+===== FILE: app/Error.hs =====
+
+module Error
+  ( L1ExceptT
+  , generalFail
+  , parserFail
+  , semanticFail
+  , dieWithError
+  ) where
+
+import           Control.Monad.Except (ExceptT, throwError)
+import qualified System.Exit as Exit
+import           System.IO (hPutStrLn, stderr)
+
+-- Predefined exit codes signaling compiler status
+parserErrorCode :: Int
+parserErrorCode = 42
+
+semanticErrorCode :: Int
+semanticErrorCode = 7
+
+-- Error message and exit code
+data L1Error
+  = Error String Int
+  | ParserError String
+  | SemanticError String
+  deriving (Show)
+
+type L1ExceptT = ExceptT L1Error IO
+
+-- Convenienve functions to throw exceptions
+generalFail :: String -> Int -> L1ExceptT a
+generalFail msg code = throwError $ Error msg code
+
+parserFail :: String -> L1ExceptT a
+parserFail = throwError . ParserError
+
+semanticFail :: String -> L1ExceptT a
+semanticFail = throwError . SemanticError
+
+-- Exit with an error message and a return code
+dieWithError :: L1Error -> IO ()
+dieWithError (Error msg code) = do
+  hPutStrLn stderr msg
+  Exit.exitWith $ Exit.ExitFailure code
+dieWithError (ParserError msg) = dieWithError (Error msg parserErrorCode)
+dieWithError (SemanticError msg) = dieWithError (Error msg semanticErrorCode)
+
+
+===== FILE: app/Compile.hs =====
+
+module Compile (
+    Job (..),
+    compile,
+) where
+
+import Compile.AAsm (codeGen)
+import Compile.AST (AST)
+import Compile.InstructionSelection (selectInstructions)
+import Compile.Parser (parseAST)
+import Compile.RegisterAllocation (allocateRegisters)
+import Compile.Semantic (semanticAnalysis)
+import Compile.X86 (X86Program (..), emitProgram)
+import Error (L1ExceptT)
+
+import Control.Monad (forM_)
+import Control.Monad.IO.Class (MonadIO (liftIO))
+
+data Job = Job
+    { src :: FilePath
+    , out :: FilePath
+    , astOut :: Maybe FilePath
+    , aasmOut :: Maybe FilePath
+    }
+    deriving (Show)
+
+compile :: Job -> L1ExceptT ()
+compile job = do
+    ast <- parseAST $ src job
+    forM_ (astOut job) $ \astFile -> do
+        liftIO $ putStrLn $ "Writing AST to " ++ astFile
+        writeAST ast astFile
+    semanticAnalysis ast
+    let abstractAsm = codeGen ast
+    forM_ (aasmOut job) $ \aasmFile -> do
+        liftIO $ putStrLn $ "Writing Abstract Assembly to " ++ aasmFile
+        liftIO $ writeFile aasmFile (unlines abstractAsm)
+    let x86Instructions = selectInstructions abstractAsm
+    let allocatedInstructions = allocateRegisters x86Instructions
+    let program =
+            X86Program
+                { globals = ["_main"]
+                , text = allocatedInstructions
+                }
+    let assembly = emitProgram program
+    let asmFile = out job ++ ".s"
+    liftIO $ writeFile asmFile assembly
+    liftIO $ putStrLn $ "Assembly written to " ++ asmFile
+    liftIO $ putStrLn $ "To compile: gcc -o " ++ out job ++ " " ++ asmFile
+
+    return ()
+
+writeAST :: AST -> FilePath -> L1ExceptT ()
+writeAST ast file = liftIO $ do
+    putStrLn $ "Writing AST to file: " ++ file
+    writeFile file (show ast)
+
+===== FILE: app/Compile/Parser.hs =====
+
+module Compile.Parser (
+    parseAST,
+    parseNumber,
+) where
+
+import Compile.AST (AST (..), Expr (..), Op (..), Stmt (..))
+import Error (L1ExceptT, parserFail)
+
+import Control.Monad.Combinators.Expr
+import Control.Monad.IO.Class (liftIO)
+import Data.Functor (void)
+import Data.Int (Int32)
+import Data.Void (Void)
+import Numeric (showHex)
+
+import Text.Megaparsec
+import Text.Megaparsec.Char
+import qualified Text.Megaparsec.Char.Lexer as L
+
+parseAST :: FilePath -> L1ExceptT AST
+parseAST path = do
+    text <- liftIO $ readFile path
+    case parse astParser path text of
+        Left err -> parserFail $ errorBundlePretty err
+        Right ast -> return ast
+
+parseNumber :: String -> Either String Integer
+parseNumber s = do
+    case parse number "<literal>" s of
+        Left err -> Left $ errorBundlePretty err
+        Right n -> Right n
+
+type Parser = Parsec Void String
+
+astParser :: Parser AST
+astParser = do
+    sc
+    -- this parses `int main()` literally, like in the L1 grammar
+    reserved "int"
+    reserved "main"
+    parens $ pure ()
+    mainBlock <- braces $ do
+        pos <- getSourcePos
+        stmts <- many stmt
+        return $ Block stmts pos
+    eof
+    return mainBlock
+
+stmt :: Parser Stmt
+stmt = do
+    s <- try decl <|> try simp <|> ret
+    semi
+    return s
+
+decl :: Parser Stmt
+decl = try declInit <|> declNoInit
+
+declNoInit :: Parser Stmt
+declNoInit = do
+    pos <- getSourcePos
+    reserved "int"
+    name <- identifier
+    return $ Decl name pos
+
+declInit :: Parser Stmt
+declInit = do
+    pos <- getSourcePos
+    reserved "int"
+    name <- identifier
+    void $ symbol "="
+    e <- expr
+    return $ Init name e pos
+
+simp :: Parser Stmt
+simp = do
+    pos <- getSourcePos
+    name <- lvalue
+    op <- asnOp
+    e <- expr
+    return $ Asgn name op e pos
+
+asnOp :: Parser (Maybe Op)
+asnOp =
+    do
+        op <- operator
+        case op of
+            "+=" -> pure (Just Add)
+            "*=" -> pure (Just Mul)
+            "-=" -> pure (Just Sub)
+            "/=" -> pure (Just Div)
+            "%=" -> pure (Just Mod)
+            "=" -> pure Nothing
+            x -> fail $ "Nonexistent assignment operator: " ++ x
+        <?> "assignment operator"
+
+ret :: Parser Stmt
+ret = do
+    pos <- getSourcePos
+    reserved "return"
+    e <- expr
+    return $ Ret e pos
+
+expr' :: Parser Expr
+expr' = parens expr <|> intExpr <|> identExpr
+
+intExpr :: Parser Expr
+intExpr = do
+    pos <- getSourcePos
+    str <- numberLiteral
+    return $ IntExpr str pos
+
+identExpr :: Parser Expr
+identExpr = do
+    pos <- getSourcePos
+    name <- identifier
+    return $ Ident name pos
+
+opTable :: [[Operator Parser Expr]]
+opTable =
+    [ [Prefix (UnExpr Neg <$ manyUnaryOp)]
+    ,
+        [ InfixL (BinExpr Mul <$ symbol "*")
+        , InfixL (BinExpr Div <$ symbol "/")
+        , InfixL (BinExpr Mod <$ symbol "%")
+        ]
+    , [InfixL (BinExpr Add <$ symbol "+"), InfixL (BinExpr Sub <$ symbol "-")]
+    ]
+  where
+    -- this allows us to parse `---x` as `-(-(-x))`
+    -- makeExprParser doesn't do this by default
+    manyUnaryOp = foldr1 (.) <$> some (UnExpr Neg <$ symbol "-")
+
+expr :: Parser Expr
+expr = makeExprParser expr' opTable <?> "expression"
+
+-- Lexer starts here, probably worth moving to its own file at some point
+sc :: Parser ()
+sc = L.space space1 lineComment blockComment
+  where
+    lineComment = L.skipLineComment "//"
+    blockComment = L.skipBlockCommentNested "/*" "*/"
+
+lexeme :: Parser a -> Parser a
+lexeme = L.lexeme sc
+
+symbol :: String -> Parser String
+symbol = L.symbol sc
+
+parens :: Parser a -> Parser a
+parens = between (symbol "(") (symbol ")")
+
+braces :: Parser a -> Parser a
+braces = between (symbol "{") (symbol "}")
+
+semi :: Parser ()
+semi = void $ symbol ";"
+
+numberLiteral :: Parser String
+numberLiteral = lexeme (try hexLiteral <|> decLiteral <?> "number")
+
+-- We want to reject leading zeroes, but `0` itself should of course be accepted
+decLiteral :: Parser String
+decLiteral = string "0" <|> (:) <$> oneOf ['1' .. '9'] <*> many digitChar
+
+hexLiteral :: Parser String
+hexLiteral = do
+    void $ chunk "0x"
+    digits <- some hexDigitChar
+    return ("0x" ++ digits)
+
+number :: Parser Integer
+number = try hexadecimal <|> decimal <?> "number"
+
+decimal :: Parser Integer
+decimal = do
+    n <- lexeme L.decimal
+    notFollowedBy alphaNumChar
+    if n < maxInt
+        then return n
+        else
+            if n == maxInt
+                then return (-maxInt)
+                else fail $ "Decimal literal out of bounds: " ++ show n
+  where
+    maxInt = 2 ^ (31 :: Integer)
+
+hexadecimal :: Parser Integer
+hexadecimal = do
+    void $ chunk "0x"
+    n <- lexeme L.hexadecimal
+    if n > maxHex
+        then fail $ "Hexadecimal literal out of bounds: " ++ "0x" ++ showHex n ""
+        else return $ toInteger ((fromInteger n) :: Int32)
+  where
+    maxHex = 0xFFFFFFFF
+
+reserved :: String -> Parser ()
+reserved w = void $ lexeme $ (string w <* notFollowedBy identLetter)
+
+reservedWords :: [String]
+reservedWords =
+    [ "alloc"
+    , "alloc_array"
+    , "assert"
+    , "bool"
+    , "break"
+    , "char"
+    , "continue"
+    , "else"
+    , "false"
+    , "for"
+    , "if"
+    , "int"
+    , "NULL"
+    , "print"
+    , "read"
+    , "return"
+    , "string"
+    , "struct"
+    , "true"
+    , "void"
+    , "while"
+    ]
+
+-- Operations
+opStart :: Parser Char
+opStart = oneOf "=+-*/%&^|<>!~"
+
+opLetter :: Parser Char
+opLetter = oneOf "=&|<>"
+
+operator :: Parser String
+operator = lexeme ((:) <$> opStart <*> many opLetter)
+
+-- Identifiers
+identStart :: Parser Char
+identStart = letterChar <|> char '_'
+
+identLetter :: Parser Char
+identLetter = alphaNumChar <|> char '_'
+
+identifier :: Parser String
+identifier = (lexeme . try) (p >>= check)
+  where
+    p = (:) <$> identStart <*> many identLetter
+    check x =
+        if x `elem` reservedWords
+            then fail (x ++ " is reserved")
+            else return x
+
+lvalue :: Parser String
+lvalue = try identifier <|> parens lvalue <?> "lvalue"
+
+
+===== FILE: app/Compile/AST.hs =====
+
+module Compile.AST (
+    AST (..),
+    Stmt (..),
+    Expr (..),
+    Op (..),
+    showAsgnOp,
+    posPretty,
+    -- remove prettyPrintAST from export list
+) where
+
+import Text.Megaparsec
+
+data AST
+    = Block [Stmt] SourcePos
+
+data Stmt
+    = Decl String SourcePos
+    | Init String Expr SourcePos
+    | Asgn String AsgnOp Expr SourcePos
+    | Ret Expr SourcePos
+
+data Expr
+    = IntExpr String SourcePos
+    | Ident String SourcePos
+    | UnExpr Op Expr
+    | BinExpr Op Expr Expr
+
+-- Nothing means =, Just is for +=, %=, ...
+type AsgnOp = Maybe Op
+
+data Op
+    = Mul
+    | Add
+    | Sub
+    | Div
+    | Neg
+    | Mod
+    | Nop
+
+-- re-exported for convenience
+posPretty :: SourcePos -> String
+posPretty = sourcePosPretty
+
+-- Enhanced Show instances for prettier output
+instance Show AST where
+    show (Block stmts _) =
+        "Program {\n" ++ indent (concatMap show stmts) ++ "}"
+
+instance Show Stmt where
+    show (Decl name pos) =
+        "Declaration: int "
+            ++ name
+            ++ ";\n"
+            ++ "  (at "
+            ++ posPretty pos
+            ++ ")\n"
+    show (Init name expr pos) =
+        "Initialization: int "
+            ++ name
+            ++ " = "
+            ++ show expr
+            ++ ";\n"
+            ++ "  (at "
+            ++ posPretty pos
+            ++ ")\n"
+    show (Asgn name op expr pos) =
+        "Assignment: "
+            ++ name
+            ++ showAsgnOp op
+            ++ show expr
+            ++ ";\n"
+            ++ "  (at "
+            ++ posPretty pos
+            ++ ")\n"
+    show (Ret expr pos) =
+        "Return: return "
+            ++ show expr
+            ++ ";\n"
+            ++ "  (at "
+            ++ posPretty pos
+            ++ ")\n"
+
+instance Show Expr where
+    show (IntExpr val _) = val
+    show (Ident name _) = name
+    show (UnExpr op expr) = "(" ++ show op ++ show expr ++ ")"
+    show (BinExpr op expr1 expr2) =
+        "(" ++ show expr1 ++ " " ++ show op ++ " " ++ show expr2 ++ ")"
+
+instance Show Op where
+    show Mul = "*"
+    show Add = "+"
+    show Sub = "-"
+    show Div = "/"
+    show Neg = "-"
+    show Mod = "%"
+    show Nop = "[nop]"
+
+showAsgnOp :: AsgnOp -> String
+showAsgnOp (Just op) = " " ++ show op ++ "= "
+showAsgnOp Nothing = " = "
+
+-- Helper function to indent a block of text
+indent :: String -> String
+indent = unlines . map ("  " ++) . lines
+
+
+===== FILE: app/Compile/X86.hs =====
+
+{-# LANGUAGE InstanceSigs #-}
+
+module Compile.X86 (
+    X86Program (..),
+    emitProgram,
+    allocatableRegisters,
+    callerSavedRegisters,
+    calleeSavedRegisters,
+    rax,
+    rbx,
+    rcx,
+    rdx,
+    rsp,
+    rbp,
+    rsi,
+    rdi,
+    r8,
+    r9,
+    r10,
+    r11,
+    r12,
+    r13,
+    r14,
+    r15,
+    regToReg,
+    immToReg,
+    push,
+    pop,
+    clearReg,
+    Size (..),
+    Register (..),
+    Operand (..),
+    Instruction (..),
+    Label,
+) where
+
+data Size = B | W | L | Q
+    deriving (Show, Eq)
+
+data Register
+    = RAX
+    | RBX
+    | RCX
+    | RDX
+    | RSP
+    | RBP
+    | RSI
+    | RDI
+    | R8
+    | R9
+    | R10
+    | R11
+    | R12
+    | R13
+    | R14
+    | R15
+    deriving (Eq, Ord, Enum)
+
+type Label = String
+
+sizedRegister :: Register -> Size -> String
+sizedRegister reg size = "%" ++ prefix ++ suffix
+  where
+    suffix = case reg of
+        RAX -> "ax"
+        RBX -> "bx"
+        RCX -> "cx"
+        RDX -> "dx"
+        RSP -> "sp"
+        RBP -> "bp"
+        RSI -> "si"
+        RDI -> "di"
+        R8 -> "8"
+        R9 -> "9"
+        R10 -> "10"
+        R11 -> "11"
+        R12 -> "12"
+        R13 -> "13"
+        R14 -> "14"
+        R15 -> "15"
+
+    prefix = case size of
+        B -> if reg `elem` [RAX, RBX, RCX, RDX] then "" else "r"
+        W -> ""
+        L -> "e"
+        Q -> "r"
+
+instance Show Register where
+    show :: Register -> String
+    show reg = sizedRegister reg Q
+
+data Operand
+    = Reg Register
+    | Imm Int
+    | Mem Register (Maybe Int)
+    | LabelOp Label
+    deriving (Eq)
+
+instance Show Operand where
+    show :: Operand -> String
+    show (Reg r) = show r
+    show (Imm i) = "$" ++ show i
+    show (Mem r Nothing) = "(" ++ show r ++ ")"
+    show (Mem r (Just offset)) = show offset ++ "(" ++ show r ++ ")"
+    show (LabelOp l) = l
+
+data Instruction
+    = MovQ Operand Operand
+    | PushQ Operand
+    | PopQ Operand
+    | AddQ Operand Operand
+    | SubQ Operand Operand
+    | ImulQ Operand Operand
+    | IdivQ Operand
+    | Cqto
+    | NegQ Operand
+    | XorQ Operand Operand
+    | CmpQ Operand Operand
+    | Jmp Label
+    | JmpInd Operand
+    | Je Label
+    | Jne Label
+    | Jg Label
+    | Jge Label
+    | Jl Label
+    | Jle Label
+    | Label Label
+    | Call Label
+    | Ret
+    | Comment String
+    | ModRmQ Operand Operand
+    deriving (Eq)
+
+instance Show Instruction where
+    show :: Instruction -> String
+    show (MovQ src dest) = "movq " ++ show src ++ ", " ++ show dest
+    show (PushQ op) = "pushq " ++ show op
+    show (PopQ op) = "popq " ++ show op
+    show (AddQ src dest) = "addq " ++ show src ++ ", " ++ show dest
+    show (SubQ src dest) = "subq " ++ show src ++ ", " ++ show dest
+    show (ImulQ src dest) = "imulq " ++ show src ++ ", " ++ show dest
+    show (IdivQ op) = "idivq " ++ show op
+    show Cqto = "cqto"
+    show (NegQ op) = "negq " ++ show op
+    show (XorQ src dest) = "xorq " ++ show src ++ ", " ++ show dest
+    show (CmpQ src dest) = "cmpq " ++ show src ++ ", " ++ show dest
+    show (Jmp label) = "jmp " ++ label
+    show (JmpInd op) = "jmp *" ++ show op
+    show (Je label) = "je " ++ label
+    show (Jne label) = "jne " ++ label
+    show (Jg label) = "jg " ++ label
+    show (Jge label) = "jge " ++ label
+    show (Jl label) = "jl " ++ label
+    show (Jle label) = "jle " ++ label
+    show (Label label) = label ++ ":"
+    show (Call label) = "call " ++ label
+    show Ret = "ret"
+    show (Comment str) = "# " ++ str
+    show (ModRmQ src dest) = "??? " ++ show src ++ ", " ++ show dest
+
+data X86Program = X86Program
+    { globals :: [String]
+    , text :: [Instruction]
+    }
+    deriving (Show)
+
+emitATT :: X86Program -> String
+emitATT prog =
+    unlines
+        [ ".global main"
+        , ".global _main"
+        , ".section .note.GNU-stack,\"\",@progbits"
+        , ".text"
+        , "main:"
+        , "    pushq %rbp"
+        , "    movq %rsp, %rbp"
+        , "    call _main"
+        , "    movq %rax, %rdi"
+        , "    movq $60, %rax"
+        , "    syscall"
+        , ""
+        , "_main:"
+        , unlines (map show (text prog))
+        ]
+
+-- emitIntel :: X86Program -> String
+-- emitIntel prog =
+--     unlines
+--         [ ".intel_syntax noprefix"
+--         , ".global main"
+--         , ".global _main"
+--         , ""
+--         , ".text"
+--         , "main:"
+--         , "    push rbp"
+--         , "    mov rbp, rsp"
+--         , "    call _main"
+--         , "    mov rdi, rax"
+--         , "    mov rax, 60"
+--         , "    syscall"
+--         , ""
+--         , "_main:" -- Add an explicit _main label for the entry point
+--         , unlines (map (showIntel . convertToIntel) (text prog))
+--         ]
+--   where
+--     convertToIntel = id
+--     showIntel = show
+
+emitProgram :: X86Program -> String
+emitProgram = emitATT
+
+callerSavedRegisters :: [Register]
+callerSavedRegisters = [RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11]
+
+calleeSavedRegisters :: [Register]
+calleeSavedRegisters = [RBX, R12, R13, R14, R15]
+
+allocatableRegisters :: [Register]
+allocatableRegisters =
+    [ RAX
+    , RCX
+    , RDX
+    , R10
+    , R11
+    , RBX
+    , R12
+    , R13
+    , R14
+    , R15
+    , RSI
+    , RDI
+    , R8
+    , R9
+    ]
+
+rax, rbx, rcx, rdx, rsp, rbp, rsi, rdi :: Register
+rax = RAX
+rbx = RBX
+rcx = RCX
+rdx = RDX
+rsp = RSP
+rbp = RBP
+rsi = RSI
+rdi = RDI
+
+r8, r9, r10, r11, r12, r13, r14, r15 :: Register
+r8 = R8
+r9 = R9
+r10 = R10
+r11 = R11
+r12 = R12
+r13 = R13
+r14 = R14
+r15 = R15
+
+regToReg :: Register -> Operand
+regToReg = Reg
+
+immToReg :: Int -> Register -> Instruction
+immToReg i r = MovQ (Imm i) (Reg r)
+
+push :: Register -> Instruction
+push = PushQ . Reg
+
+pop :: Register -> Instruction
+pop = PopQ . Reg
+
+clearReg :: Register -> Instruction
+clearReg r = XorQ (Reg r) (Reg r)
+
+===== FILE: app/Compile/RegisterAllocation.hs =====
+
+module Compile.RegisterAllocation (
+    allocateRegisters,
+) where
+
+import qualified Compile.X86 as X86
+import Control.Monad.State
+import Data.List (find, foldl', nub)
+import qualified Data.Map as Map
+import Data.Maybe (fromMaybe)
+
+-- Virtual register identifier
+type VirtualReg = Int
+
+-- Physical register or stack location
+data Location
+    = PhysReg X86.Register
+    | StackSlot Int -- Offset from base pointer
+    deriving (Show, Eq)
+
+-- Register allocation state
+data AllocState = AllocState
+    { regMap :: Map.Map VirtualReg Location -- Virtual to physical mapping
+    , freeRegs :: [X86.Register] -- Available physical registers
+    , nextOffset :: Int -- Next available stack offset
+    , spilledRegs :: [VirtualReg] -- Which registers were spilled
+    }
+    deriving (Show)
+
+-- Main entry point: allocate registers for a sequence of instructions
+allocateRegisters :: [X86.Instruction] -> [X86.Instruction]
+allocateRegisters instrs =
+    evalState (allocateProgram instrs) initialState
+  where
+    initialState =
+        AllocState
+            { regMap = Map.empty
+            , freeRegs = X86.allocatableRegisters
+            , nextOffset = -8 -- Start at -8(%rbp)
+            , spilledRegs = []
+            }
+
+-- Process entire instruction sequence
+allocateProgram :: [X86.Instruction] -> State AllocState [X86.Instruction]
+allocateProgram instrs = do
+    -- First, collect all virtual registers
+    let vregs = collectVirtualRegs instrs
+
+    -- Allocate locations for all virtual registers
+    mapM_ allocateLocation vregs
+
+    -- Transform the instructions using the allocation
+    processedInstrs <- mapM processInstruction instrs
+
+    -- Get prologue and epilogue instructions
+    prologue <- generatePrologue
+    epilogue <- generateEpilogue
+
+    -- Add debug info
+    state <- get
+    let debugInfo = [X86.Comment $ "Register allocation: " ++ show (regMap state)]
+
+    -- Return complete transformed program with epilogue BEFORE any ret instructions
+    return $ prologue ++ debugInfo ++ insertEpilogueBeforeRet (concat processedInstrs) epilogue
+
+-- Insert epilogue before any ret instruction
+insertEpilogueBeforeRet :: [X86.Instruction] -> [X86.Instruction] -> [X86.Instruction]
+insertEpilogueBeforeRet [] epilogue = epilogue
+insertEpilogueBeforeRet (instr : instrs) epilogue =
+    case instr of
+        X86.Ret -> epilogue ++ [X86.Ret] ++ insertEpilogueBeforeRet instrs []
+        _ -> instr : insertEpilogueBeforeRet instrs epilogue
+
+-- Collect all virtual registers used in the program
+collectVirtualRegs :: [X86.Instruction] -> [VirtualReg]
+collectVirtualRegs instrs = nub $ concatMap getVRegsFromInstr instrs
+  where
+    getVRegsFromInstr :: X86.Instruction -> [VirtualReg]
+    getVRegsFromInstr instr = case instr of
+        X86.MovQ src dst -> getVRegsFromOp src ++ getVRegsFromOp dst
+        X86.AddQ src dst -> getVRegsFromOp src ++ getVRegsFromOp dst
+        X86.SubQ src dst -> getVRegsFromOp src ++ getVRegsFromOp dst
+        X86.ImulQ src dst -> getVRegsFromOp src ++ getVRegsFromOp dst
+        X86.IdivQ op -> getVRegsFromOp op
+        X86.NegQ op -> getVRegsFromOp op
+        X86.PushQ op -> getVRegsFromOp op
+        X86.PopQ op -> getVRegsFromOp op
+        X86.XorQ src dst -> getVRegsFromOp src ++ getVRegsFromOp dst
+        X86.CmpQ src dst -> getVRegsFromOp src ++ getVRegsFromOp dst
+        _ -> []
+
+    getVRegsFromOp :: X86.Operand -> [VirtualReg]
+    getVRegsFromOp op = case op of
+        X86.Reg r -> case getVirtualRegFromPhysical r of
+            Just vreg -> [vreg]
+            Nothing -> []
+        X86.Mem r _ -> case getVirtualRegFromPhysical r of
+            Just vreg -> [vreg]
+            Nothing -> []
+        _ -> []
+
+    -- Extract virtual register from physical register (if any)
+    -- This is based on convention from instruction selection
+    getVirtualRegFromPhysical :: X86.Register -> Maybe VirtualReg
+    getVirtualRegFromPhysical reg =
+        case reg of
+            X86.RAX -> Just 0
+            X86.RBX -> Just 1
+            X86.RCX -> Just 2
+            X86.RDX -> Just 3
+            X86.RSI -> Just 4
+            X86.RDI -> Just 5
+            X86.R8 -> Just 6
+            X86.R9 -> Just 7
+            X86.R10 -> Just 8
+            X86.R11 -> Just 9
+            X86.R12 -> Just 10
+            X86.R13 -> Just 11
+            X86.R14 -> Just 12
+            X86.R15 -> Just 13
+            _ -> Nothing
+
+-- Allocate a location for a virtual register
+allocateLocation :: VirtualReg -> State AllocState ()
+allocateLocation vreg = do
+    state <- get
+
+    -- Check if already allocated
+    case Map.lookup vreg (regMap state) of
+        Just _ -> return () -- Already allocated
+        Nothing ->
+            -- Try to allocate a physical register
+            if null (freeRegs state)
+                then do
+                    -- Need to spill to stack
+                    let offset = nextOffset state
+                        newState =
+                            state
+                                { regMap = Map.insert vreg (StackSlot offset) (regMap state)
+                                , nextOffset = offset - 8 -- Decrement by 8 bytes (size of a register)
+                                , spilledRegs = vreg : spilledRegs state
+                                }
+                    put newState
+                else do
+                    -- Allocate a physical register
+                    let physReg = head (freeRegs state)
+                        newState =
+                            state
+                                { regMap = Map.insert vreg (PhysReg physReg) (regMap state)
+                                , freeRegs = tail (freeRegs state)
+                                }
+                    put newState
+
+-- Generate function prologue based on used stack space
+generatePrologue :: State AllocState [X86.Instruction]
+generatePrologue = do
+    state <- get
+    let stackSize = abs (nextOffset state) + 8 -- Amount of stack space needed
+        alignedSize = ((stackSize + 15) `div` 16) * 16 -- Align to 16 bytes
+    return
+        [ X86.PushQ (X86.Reg X86.RBP)
+        , X86.MovQ (X86.Reg X86.RSP) (X86.Reg X86.RBP)
+        , X86.SubQ (X86.Imm alignedSize) (X86.Reg X86.RSP)
+        , X86.Comment "Register allocation begins"
+        ]
+
+-- Generate function epilogue
+generateEpilogue :: State AllocState [X86.Instruction]
+generateEpilogue = do
+    return
+        [ X86.Comment "Register allocation ends"
+        , X86.MovQ (X86.Reg X86.RBP) (X86.Reg X86.RSP)
+        , X86.PopQ (X86.Reg X86.RBP)
+        ]
+
+-- Process an instruction to use allocated registers
+processInstruction :: X86.Instruction -> State AllocState [X86.Instruction]
+processInstruction instr = do
+    case instr of
+        X86.MovQ src dst -> do
+            newSrc <- translateOperand src
+            newDst <- translateOperand dst
+            return [X86.MovQ newSrc newDst]
+        X86.AddQ src dst -> do
+            newSrc <- translateOperand src
+            newDst <- translateOperand dst
+            return [X86.AddQ newSrc newDst]
+        X86.SubQ src dst -> do
+            newSrc <- translateOperand src
+            newDst <- translateOperand dst
+            return [X86.SubQ newSrc newDst]
+        X86.ImulQ src dst -> do
+            newSrc <- translateOperand src
+            newDst <- translateOperand dst
+            return [X86.ImulQ newSrc newDst]
+        X86.IdivQ op -> do
+            newOp <- translateOperand op
+            return [X86.IdivQ newOp]
+        X86.Cqto ->
+            return [X86.Cqto]
+        X86.NegQ op -> do
+            newOp <- translateOperand op
+            return [X86.NegQ newOp]
+        X86.XorQ src dst -> do
+            newSrc <- translateOperand src
+            newDst <- translateOperand dst
+            return [X86.XorQ newSrc newDst]
+        X86.CmpQ src dst -> do
+            newSrc <- translateOperand src
+            newDst <- translateOperand dst
+            return [X86.CmpQ newSrc newDst]
+        X86.PushQ op -> do
+            newOp <- translateOperand op
+            return [X86.PushQ newOp]
+        X86.PopQ op -> do
+            newOp <- translateOperand op
+            return [X86.PopQ newOp]
+        X86.Label lbl ->
+            return [X86.Label lbl]
+        X86.Ret ->
+            return [X86.Ret]
+        X86.Comment cmt ->
+            return [X86.Comment cmt]
+        _ ->
+            return [X86.Comment $ "Unhandled instruction: " ++ show instr]
+
+-- Translate operand based on register allocation
+translateOperand :: X86.Operand -> State AllocState X86.Operand
+translateOperand op = case op of
+    X86.Reg reg -> do
+        case getVirtualRegFromPhysical reg of
+            Just vreg -> do
+                state <- get
+                case Map.lookup vreg (regMap state) of
+                    Just (PhysReg physReg) ->
+                        return $ X86.Reg physReg
+                    Just (StackSlot offset) ->
+                        return $ X86.Mem X86.RBP (Just offset)
+                    Nothing ->
+                        return op -- Unallocated register (probably fixed like RAX)
+            Nothing ->
+                return op -- Not a virtual register
+    _ ->
+        return op -- Other operands unchanged
+  where
+    -- Extract virtual register from physical register (same as above)
+    getVirtualRegFromPhysical :: X86.Register -> Maybe VirtualReg
+    getVirtualRegFromPhysical reg =
+        case reg of
+            X86.RAX -> Just 0
+            X86.RBX -> Just 1
+            X86.RCX -> Just 2
+            X86.RDX -> Just 3
+            X86.RSI -> Just 4
+            X86.RDI -> Just 5
+            X86.R8 -> Just 6
+            X86.R9 -> Just 7
+            X86.R10 -> Just 8
+            X86.R11 -> Just 9
+            X86.R12 -> Just 10
+            X86.R13 -> Just 11
+            X86.R14 -> Just 12
+            X86.R15 -> Just 13
+            _ -> Nothing
+
+===== FILE: app/Compile/InstructionSelection.hs =====
+
+module Compile.InstructionSelection (
+    selectInstructions,
+) where
+
+import Compile.X86 as X86
+import Data.List (isPrefixOf)
+
+-- Main function to convert abstract assembly to x86 instructions
+selectInstructions :: [String] -> [X86.Instruction]
+selectInstructions = concatMap translateInstruction
+
+-- Translate a single abstract assembly instruction to x86 instructions
+translateInstruction :: String -> [X86.Instruction]
+translateInstruction line
+    | "%" `isPrefixOf` trimmed && '=' `elem` trimmed = translateAssignment trimmed -- Assignment with % register
+    | "%" `isPrefixOf` trimmed = [X86.Label $ "label_" ++ drop 1 trimmed] -- Label
+    | "ret" `isPrefixOf` trimmed = translateRet trimmed -- Return
+    | otherwise = [X86.Comment $ "Unhandled: " ++ trimmed] -- Unhandled
+  where
+    trimmed = trim line
+
+-- Parse an assignment instruction like "%0 = 42" or "%1 = %0 + %2"
+translateAssignment :: String -> [X86.Instruction]
+translateAssignment line =
+    case break (== '=') line of
+        (dest, '=' : srcExpr) ->
+            let
+                destReg = parseVirtualReg (trim dest)
+                srcTrimmed = trim srcExpr
+             in
+                -- Check if this is a compound assignment (+=, -=, etc.)
+                if '%' `elem` srcTrimmed && any (`elem` srcTrimmed) ['+', '-', '*', '/', '%'] && notElem ' ' srcTrimmed
+                    then
+                        -- Handle compound assignment like "%0 += %1"
+                        translateCompoundAssignment destReg srcTrimmed
+                    else
+                        -- Handle normal assignment
+                        case words srcTrimmed of
+                            -- Handle immediate assignment: "%0 = 42"
+                            [val]
+                                | all isDigit val ->
+                                    [X86.MovQ (X86.Imm (read val)) (X86.Reg (safeVirtualToPhysical destReg))]
+                            -- Handle register assignment: "%0 = %1"
+                            [src]
+                                | head src == '%' ->
+                                    let srcReg = parseVirtualReg src
+                                     in [X86.MovQ (X86.Reg (safeVirtualToPhysical srcReg)) (X86.Reg (safeVirtualToPhysical destReg))]
+                            -- Handle binary operations: "%0 = %1 + %2"
+                            [src1, op, src2] -> translateBinaryOp destReg src1 op src2
+                            _ -> [X86.Comment $ "Unhandled assignment: " ++ line]
+        _ -> [X86.Comment $ "Malformed assignment: " ++ line]
+
+-- Parse and translate compound assignment operations like "%0 += %1"
+translateCompoundAssignment :: Int -> String -> [X86.Instruction]
+translateCompoundAssignment destReg expr =
+    let
+        -- Extract the operation type and source register
+        (opStr, srcRegStr) = span (/= '%') expr
+        srcReg = parseVirtualReg srcRegStr
+
+        -- Convert operation to instruction
+        instructions = case opStr of
+            "+=" ->
+                [X86.AddQ (X86.Reg (safeVirtualToPhysical srcReg)) (X86.Reg (safeVirtualToPhysical destReg))]
+            "-=" ->
+                [X86.SubQ (X86.Reg (safeVirtualToPhysical srcReg)) (X86.Reg (safeVirtualToPhysical destReg))]
+            "*=" ->
+                [X86.ImulQ (X86.Reg (safeVirtualToPhysical srcReg)) (X86.Reg (safeVirtualToPhysical destReg))]
+            "/=" ->
+                [ X86.MovQ (X86.Reg (safeVirtualToPhysical destReg)) (X86.Reg X86.RAX)
+                , X86.Cqto
+                , X86.IdivQ (X86.Reg (safeVirtualToPhysical srcReg))
+                , X86.MovQ (X86.Reg X86.RAX) (X86.Reg (safeVirtualToPhysical destReg))
+                ]
+            "%=" ->
+                [ X86.MovQ (X86.Reg (safeVirtualToPhysical destReg)) (X86.Reg X86.RAX)
+                , X86.Cqto
+                , X86.IdivQ (X86.Reg (safeVirtualToPhysical srcReg))
+                , X86.MovQ (X86.Reg X86.RDX) (X86.Reg (safeVirtualToPhysical destReg))
+                ]
+            _ -> [X86.Comment $ "Unsupported compound assignment: " ++ opStr]
+     in
+        instructions
+
+-- Translate a binary operation
+translateBinaryOp :: Int -> String -> String -> String -> [X86.Instruction]
+translateBinaryOp dest src1 op src2 =
+    let
+        destReg = safeVirtualToPhysical dest
+        instructions = case (parseOperand src1, op, parseOperand src2) of
+            -- Addition
+            (Left s1, "+", Left s2) ->
+                [ X86.MovQ (X86.Reg (safeVirtualToPhysical s1)) (X86.Reg destReg)
+                , X86.AddQ (X86.Reg (safeVirtualToPhysical s2)) (X86.Reg destReg)
+                ]
+            (Left s1, "+", Right imm) ->
+                [ X86.MovQ (X86.Reg (safeVirtualToPhysical s1)) (X86.Reg destReg)
+                , X86.AddQ (X86.Imm imm) (X86.Reg destReg)
+                ]
+            -- Subtraction
+            (Left s1, "-", Left s2) ->
+                [ X86.MovQ (X86.Reg (safeVirtualToPhysical s1)) (X86.Reg destReg)
+                , X86.SubQ (X86.Reg (safeVirtualToPhysical s2)) (X86.Reg destReg)
+                ]
+            (Left s1, "-", Right imm) ->
+                [ X86.MovQ (X86.Reg (safeVirtualToPhysical s1)) (X86.Reg destReg)
+                , X86.SubQ (X86.Imm imm) (X86.Reg destReg)
+                ]
+            -- Multiplication
+            (Left s1, "*", Left s2) ->
+                [ X86.MovQ (X86.Reg (safeVirtualToPhysical s1)) (X86.Reg destReg)
+                , X86.ImulQ (X86.Reg (safeVirtualToPhysical s2)) (X86.Reg destReg)
+                ]
+            (Left s1, "*", Right imm) ->
+                [ X86.MovQ (X86.Reg (safeVirtualToPhysical s1)) (X86.Reg destReg)
+                , X86.ImulQ (X86.Imm imm) (X86.Reg destReg)
+                ]
+            -- Division (x86 division is special: quotient in RAX, remainder in RDX)
+            (Left s1, "/", Left s2) ->
+                [ X86.MovQ (X86.Reg (safeVirtualToPhysical s1)) (X86.Reg X86.RAX)
+                , X86.Cqto
+                , X86.IdivQ (X86.Reg (safeVirtualToPhysical s2))
+                , X86.MovQ (X86.Reg X86.RAX) (X86.Reg destReg)
+                ]
+            (Left s1, "/", Right imm) ->
+                let tmpReg = X86.RCX
+                 in [ X86.MovQ (X86.Reg (safeVirtualToPhysical s1)) (X86.Reg X86.RAX)
+                    , X86.MovQ (X86.Imm imm) (X86.Reg tmpReg)
+                    , X86.Cqto
+                    , X86.IdivQ (X86.Reg tmpReg)
+                    , X86.MovQ (X86.Reg X86.RAX) (X86.Reg destReg)
+                    ]
+            -- Modulus (remainder in RDX after division)
+            (Left s1, "%", Left s2) ->
+                [ X86.MovQ (X86.Reg (safeVirtualToPhysical s1)) (X86.Reg X86.RAX)
+                , X86.Cqto
+                , X86.IdivQ (X86.Reg (safeVirtualToPhysical s2))
+                , X86.MovQ (X86.Reg X86.RDX) (X86.Reg destReg)
+                ]
+            (Left s1, "%", Right imm) ->
+                let tmpReg = X86.RCX
+                 in [ X86.MovQ (X86.Reg (safeVirtualToPhysical s1)) (X86.Reg X86.RAX)
+                    , X86.MovQ (X86.Imm imm) (X86.Reg tmpReg)
+                    , X86.Cqto
+                    , X86.IdivQ (X86.Reg tmpReg)
+                    , X86.MovQ (X86.Reg X86.RDX) (X86.Reg destReg)
+                    ]
+            -- Unhandled cases
+            _ -> [X86.Comment $ "Unhandled binary operation: " ++ src1 ++ " " ++ op ++ " " ++ src2]
+     in
+        instructions
+
+-- Translate return instruction
+translateRet :: String -> [X86.Instruction]
+translateRet line =
+    case words line of
+        ["ret", reg]
+            | head reg == '%' ->
+                let srcReg = parseVirtualReg reg
+                 in [X86.MovQ (X86.Reg (safeVirtualToPhysical srcReg)) (X86.Reg X86.RAX), X86.Ret]
+        ["ret"] -> [X86.Ret]
+        _ -> [X86.Comment $ "Unhandled return: " ++ line, X86.Ret]
+
+-- Parse a virtual register like "%0" into its number
+parseVirtualReg :: String -> Int
+parseVirtualReg reg =
+    -- Extract just the number part, handling any trailing characters
+    let numStr = takeWhile isDigit (dropWhile (not . isDigit) reg)
+     in if null numStr
+            then error $ "Invalid virtual register: " ++ reg
+            else read numStr
+
+-- Parse an operand (either register or immediate)
+parseOperand :: String -> Either Int Int
+parseOperand s
+    | head s == '%' = Left (parseVirtualReg s)
+    | all isDigit s = Right (read s)
+    | otherwise = error $ "Invalid operand: " ++ s
+
+-- Modified mapping from virtual to physical registers
+-- This function will reuse registers in a cycle rather than failing
+safeVirtualToPhysical :: Int -> X86.Register
+safeVirtualToPhysical vreg =
+    -- Get the appropriate register from the allocatable list
+    -- Use modulo to cycle through the available registers
+    let physicalRegs = X86.allocatableRegisters
+        index = vreg `mod` length physicalRegs
+     in physicalRegs !! index
+
+-- Helper functions
+trim :: String -> String
+trim = reverse . dropWhile isSpace . reverse . dropWhile isSpace
+
+isDigit :: Char -> Bool
+isDigit c = c >= '0' && c <= '9'
+
+isSpace :: Char -> Bool
+isSpace c = c == ' ' || c == '\t'
+
+-- stripPrefix :: String -> String -> Maybe String
+-- stripPrefix [] ys = Just ys
+-- stripPrefix (x : xs) (y : ys)
+--     | x == y = stripPrefix xs ys
+--     | otherwise = Nothing
+-- stripPrefix _ _ = Nothing
+
+===== FILE: app/Compile/AAsm.hs =====
+
+module Compile.AAsm (
+    codeGen,
+) where
+
+import Compile.AST (AST (..), Expr (..), Stmt (..), showAsgnOp)
+import Compile.Parser (parseNumber)
+
+import Control.Monad.State
+import qualified Data.Map as Map
+
+type Register = Integer
+
+type VarName = String
+
+type AAsmAlloc = Map.Map VarName Register
+
+type CodeGen a = State CodeGenState a
+
+data CodeGenState = CodeGenState
+    { regMap :: AAsmAlloc
+    , nextReg :: Register
+    , code :: [String]
+    , usedRegs :: [Register] -- Keep track of used registers
+    }
+
+codeGen :: AST -> [String]
+codeGen (Block stmts _) = code $ execState (genBlock stmts) initialState
+  where
+    initialState = CodeGenState Map.empty 0 [] []
+
+regName :: Register -> String
+regName n = "%" ++ show n
+
+-- Get a register that might be reused if possible
+allocReg :: CodeGen Register
+allocReg = do
+    curr <- get
+    -- Try to reuse registers that are no longer needed
+    let usedR = usedRegs curr
+        r = nextReg curr
+    put curr{nextReg = r + 1, usedRegs = r : usedR}
+    return r
+
+-- Mark a register as available for reuse
+freeReg :: Register -> CodeGen ()
+freeReg r = do
+    curr <- get
+    put curr{usedRegs = filter (/= r) (usedRegs curr)}
+
+assignVar :: VarName -> Register -> CodeGen ()
+assignVar name r = do
+    m <- gets regMap
+    -- If the variable was previously assigned, free its register
+    case Map.lookup name m of
+        Just oldReg -> freeReg oldReg
+        Nothing -> return ()
+    -- Assign the new register
+    modify $ \s -> s{regMap = Map.insert name r (regMap s)}
+
+lookupVar :: VarName -> CodeGen Register
+lookupVar name = do
+    m <- gets regMap
+    case Map.lookup name m of
+        Just r -> return r
+        Nothing -> unreachable "lookupVar"
+
+emit :: String -> CodeGen ()
+emit instr = modify $ \s -> s{code = code s ++ [instr]}
+
+genBlock :: [Stmt] -> CodeGen ()
+genBlock = mapM_ genStmt
+
+genStmt :: Stmt -> CodeGen ()
+genStmt (Decl name _) = do
+    r <- allocReg
+    assignVar name r
+genStmt (Init name e _) = do
+    r <- genExpr e
+    assignVar name r
+genStmt (Asgn name op e _) = do
+    rhs <- genExpr e
+    lhs <- lookupVar name
+    case op of
+        Nothing -> do
+            -- For direct assignment, we can free the old register
+            -- and use the new one directly
+            emit $ regName lhs ++ " = " ++ regName rhs
+            freeReg lhs
+            assignVar name rhs
+        Just _ -> do
+            -- For operations like +=, we need both registers
+            emit $ regName lhs ++ showAsgnOp op ++ regName rhs
+            -- The result is in lhs, so we can free rhs
+            freeReg rhs
+genStmt (Ret e _) = do
+    r <- genExpr e
+    emit $ "ret " ++ regName r
+
+-- No need to free register after return
+
+genExpr :: Expr -> CodeGen Register
+genExpr (IntExpr str _) = do
+    case parseNumber str of
+        Left err -> unreachable err
+        Right val -> do
+            r <- allocReg
+            emit $ regName r ++ " = " ++ show val
+            return r
+genExpr (Ident name _) = lookupVar name
+genExpr (UnExpr op e) = do
+    r1 <- genExpr e
+    r <- allocReg
+    emit $ regName r ++ " = " ++ show op ++ " " ++ regName r1
+    freeReg r1 -- Free the source register
+    return r
+genExpr (BinExpr op e1 e2) = do
+    r1 <- genExpr e1
+    r2 <- genExpr e2
+    r <- allocReg
+    emit $ regName r ++ " = " ++ regName r1 ++ " " ++ show op ++ " " ++ regName r2
+    -- Free the source registers
+    freeReg r1
+    freeReg r2
+    return r
+
+unreachable :: String -> a
+unreachable e = error $ "Unreachable, fix your semantic analysis: " ++ e
+
+===== FILE: app/Compile/Semantic.hs =====
+
+module Compile.Semantic (
+    semanticAnalysis,
+) where
+
+import Compile.AST (AST (..), Expr (..), Stmt (..), posPretty)
+import Compile.Parser (parseNumber)
+import Error (L1ExceptT, semanticFail)
+
+import Control.Monad.State
+import qualified Data.Map as Map
+
+data VariableStatus
+    = Declared
+    | Initialized
+    deriving (Show)
+
+-- You might want to keep track of some location information as well at some point
+type Namespace = Map.Map String VariableStatus
+
+type L1Semantic = StateT Namespace L1ExceptT
+
+-- A little wrapper so we don't have to ($ lift) everywhere inside the StateT
+semanticFail' :: String -> L1Semantic a
+semanticFail' = lift . semanticFail
+
+semanticAnalysis :: AST -> L1ExceptT ()
+semanticAnalysis ast = do
+    ns <- varStatusAnalysis ast
+    evalStateT (checkReturns ast) ns
+
+-- right now an AST is just a list of statements
+varStatusAnalysis :: AST -> L1ExceptT Namespace
+varStatusAnalysis (Block stmts _) = do
+    execStateT (mapM_ checkStmt stmts) Map.empty
+
+-- So far this checks:
+-- + we cannot declare a variable again that has already been declared or initialized
+-- + we cannot initialize a variable again that has already been declared or initialized
+-- + a variable needs to be declared or initialized before we can assign to it
+-- + we can only return valid expressions
+checkStmt :: Stmt -> L1Semantic ()
+checkStmt (Decl name pos) = do
+    ns <- get
+    let isDeclared = Map.member name ns
+    when isDeclared $
+        semanticFail' $
+            "Variable " ++ name ++ " redeclared at: " ++ posPretty pos
+    put $ Map.insert name Declared ns
+checkStmt (Init name e pos) = do
+    ns <- get
+    let isDeclared = Map.member name ns
+    when isDeclared $
+        semanticFail' $
+            "Variable " ++ name ++ " redeclared (initialized) at: " ++ posPretty pos
+    checkExpr e
+    put $ Map.insert name Initialized ns
+checkStmt (Asgn name op e pos) = do
+    ns <- get
+    case op of
+        Nothing -> do
+            -- Assignment with `=`
+            -- If we assign to a variable with `=`, it has to be either declared or initialized
+            unless (Map.member name ns) $
+                semanticFail' $
+                    "Trying to assign to undeclared variable "
+                        ++ name
+                        ++ " at: "
+                        ++ posPretty pos
+            checkExpr e
+            put $ Map.insert name Initialized ns
+        Just _ ->
+            -- Assinging with op, e.g. `x += 3`,
+            -- for this x needs to be intialized, not just declasred
+            case Map.lookup name ns of
+                Just Initialized -> do
+                    checkExpr e
+                _ ->
+                    semanticFail' $
+                        "Trying to assignOp to undeclared variable "
+                            ++ name
+                            ++ " at: "
+                            ++ posPretty pos
+checkStmt (Ret e _) = checkExpr e
+
+checkExpr :: Expr -> L1Semantic ()
+checkExpr (IntExpr str pos) = do
+    -- Check that literals are in bounds
+    let res = parseNumber str
+    case res of
+        Left e -> do
+            semanticFail' $ "Error in " ++ posPretty pos ++ e
+        Right _ -> return ()
+checkExpr (Ident name pos) = do
+    ns <- get
+    case Map.lookup name ns of
+        Just Initialized -> return ()
+        _ ->
+            semanticFail' $
+                "Variable "
+                    ++ name
+                    ++ " used without initialization at: "
+                    ++ posPretty pos
+checkExpr (UnExpr _ e) = checkExpr e
+checkExpr (BinExpr _ lhs rhs) = checkExpr lhs >> checkExpr rhs
+
+checkReturns :: AST -> L1Semantic ()
+checkReturns (Block stmts _) = do
+    let returns = any isReturn stmts
+    unless returns $ semanticFail' "Program does not return"
+  where
+    isReturn (Ret _ _) = True
+    isReturn _ = False
+
+
+===== FILE: build.sh =====
+
+#!/bin/bash
+
+# This script is supposed to build your compiler
+make all
+
+
+===== FILE: test.s =====
+
+.global main
+.global _main
+.section .note.GNU-stack,"",@progbits
+.text
+main:
+    pushq %rbp
+    movq %rsp, %rbp
+    call _main
+    movq %rax, %rdi
+    movq $60, %rax
+    syscall
+
+_main:
+pushq %rbp
+movq %rsp, %rbp
+subq $16, %rsp
+# Register allocation begins
+# Register allocation: fromList [(0,PhysReg %rax),(1,PhysReg %rbx),(2,PhysReg %rcx),(3,PhysReg %rdx),(4,PhysReg %rsi),(5,PhysReg %rdi),(6,PhysReg %r8),(7,PhysReg %r9),(8,PhysReg %r10),(9,PhysReg %r11),(10,PhysReg %r12),(11,PhysReg %r13),(12,PhysReg %r14),(13,PhysReg %r15)]
+movq $1, %rax
+movq %rax, %rcx
+addq %rax, %rcx
+movq %rcx, %rdx
+addq %rax, %rdx
+movq %rdx, %r10
+addq %rax, %r10
+movq %r10, %r11
+addq %rax, %r11
+movq %r11, %rbx
+addq %rax, %rbx
+movq %rbx, %r12
+addq %rax, %r12
+movq %r12, %r13
+addq %rax, %r13
+movq %r13, %r14
+addq %rax, %r14
+movq %r14, %r15
+addq %rax, %r15
+movq %r15, %rsi
+addq %rax, %rsi
+movq %rsi, %rdi
+addq %rax, %rdi
+movq %rdi, %r8
+addq %rax, %r8
+movq %r8, %r9
+addq %rax, %r9
+movq %r9, %rax
+addq %rax, %rax
+movq %rax, %rcx
+addq %rax, %rcx
+movq %rcx, %rdx
+addq %rax, %rdx
+movq %rdx, %r10
+addq %rax, %r10
+movq %r10, %r11
+addq %rax, %r11
+movq %r11, %rbx
+addq %rax, %rbx
+movq %rbx, %r12
+addq %rax, %r12
+movq %r12, %r13
+addq %rax, %r13
+movq %r13, %r14
+addq %rax, %r14
+movq %r14, %r15
+addq %rax, %r15
+movq %r15, %rsi
+addq %rax, %rsi
+movq %rsi, %rdi
+addq %rax, %rdi
+movq %rdi, %r8
+addq %rax, %r8
+movq %r8, %r9
+addq %rax, %r9
+movq %r9, %rax
+addq %rax, %rax
+movq %rax, %rcx
+addq %rax, %rcx
+movq %rcx, %rdx
+addq %rax, %rdx
+movq %rdx, %r10
+addq %rax, %r10
+movq %r10, %r11
+addq %rax, %r11
+movq %r11, %rbx
+addq %rax, %rbx
+movq %rbx, %r12
+addq %rax, %r12
+movq %r12, %r13
+addq %rax, %r13
+movq %r13, %r14
+addq %rax, %r14
+movq %r14, %r15
+addq %rax, %r15
+movq %r15, %rsi
+addq %rax, %rsi
+movq %rsi, %rdi
+addq %rax, %rdi
+movq %rdi, %r8
+addq %rax, %r8
+movq %r8, %r9
+addq %rax, %r9
+movq %r9, %rax
+# Register allocation ends
+movq %rbp, %rsp
+popq %rbp
+ret
+
+
+
+===== FILE: l1c.cabal =====
+
+cabal-version:      3.0
+name:               l1c
+version:            0.1.0.0
+
+synopsis: Simple toy compiler
+description: This was developed for the lecture 'Compiler Design' in the summer term 2025 by André Platzer at KIT Karlsruhe
+
+author:             Darius Schefer
+maintainer:         darius.schefer@student.kit.edu
+
+build-type:         Simple
+
+common warnings
+    ghc-options: -Wall
+
+executable l1c
+    import:           warnings
+    main-is:          Main.hs
+    build-depends:
+                  base >= 4.15 && < 5,
+                  containers,
+                  directory,
+                  filepath,
+                  megaparsec >= 9.7.0,
+                  mtl,
+                  optparse-applicative >= 0.18.1.0,
+                  parser-combinators,
+                  process,
+                  transformers
+    other-modules:
+                  Args,
+                  Compile,
+                  Compile.AST,
+                  Compile.X86,
+                  Compile.InstructionSelection,
+                  Compile.RegisterAllocation,
+                  Compile.Parser,
+                  Compile.Semantic,
+                  Compile.AAsm,
+                  Error
+    hs-source-dirs:   app
+    default-language: Haskell2010
+
+===== FILE: run.sh =====
+
+#!/bin/bash
+set -e
+
+if [ $# -lt 2 ]; then
+    echo "Usage: $0 <input-file> <output-file> [--ast-out <ast-file>] [--aasm-out <aasm-file>]"
+    exit 1
+fi
+
+# Mandatory args
+input_file=$1
+output_file=$2
+shift 2
+
+# Optional flags
+ast_out=""
+aasm_out=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --ast-out)
+            ast_out=$2
+            shift 2
+            ;;
+        --aasm-out)
+            aasm_out=$2
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+# Build the list of flags to pass to the compiler
+compiler_flags=()
+if [[ -n $ast_out ]]; then
+    compiler_flags+=(--ast-out "$ast_out")
+fi
+if [[ -n $aasm_out ]]; then
+    compiler_flags+=(--aasm-out "$aasm_out")
+fi
+
+echo "Running: cabal run l1c -- \"$input_file\" \"$output_file\" ${compiler_flags[*]}"
+cabal run l1c -- "$input_file" "$output_file" "${compiler_flags[@]}"
+
+if [[ -n $aasm_out ]]; then
+    if [[ ! -f $aasm_out ]]; then
+        echo "Error: Abstract assembly file not generated: $aasm_out"
+        exit 1
+    fi
+fi
+
+asm_file="${output_file}.s"
+if [[ ! -f $asm_file ]]; then
+    echo "Error: Assembly file not generated: $asm_file"
+    exit 1
+fi
+
+# Link
+echo "Compiling assembly to executable..."
+gcc -o "$output_file" "$asm_file" -Wl,-z,noexecstack
+
+echo "Successfully compiled: $output_file"
+echo "You can run it with: ./$output_file"
+
+
+===== FILE: test.l1 =====
+
+int main() {
+  int i = 1;
+  return i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i + i;
+}
+
+===== FILE: Makefile =====
+
+.PHONY: all build configure clean
+
+all: build
+
+build: configure
+	cabal build
+
+configure:
+	cabal update
+	cabal configure
+
+clean:
+	cabal clean

@@ -1,0 +1,23 @@
+int main() {
+int a = 0x69;
+int b = 0x420;
+int t;
+
+t = b;
+b = a % b;
+a = t;
+
+t = b;
+b = a % b;
+a = t;
+
+t = b;
+b = a % b;
+a = t;
+
+t = b;
+b = a % b;
+a = t;
+
+return a;
+}

@@ -6,7 +6,6 @@ import Compile.AST (AST (..), Expr (..), Stmt (..), posPretty)
 import Compile.Parser (parseNumber)
 import Error (L1ExceptT, semanticFail)
 
-import Control.Monad (unless, when)
 import Control.Monad.State
 import qualified Data.Map as Map
 

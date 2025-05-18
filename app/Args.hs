@@ -1,9 +1,9 @@
-module Args
-  ( jobParser
-  , validateJob
-  ) where
+module Args (
+    jobParser,
+    validateJob,
+) where
 
-import Compile (Job(..), src)
+import Compile (Job (..))
 import Error (L1ExceptT, generalFail)
 import System.Directory (doesFileExist)
 
@@ -13,21 +13,36 @@ import Options.Applicative
 
 jobP :: Parser Job
 jobP =
-  Job
-    <$> argument str (metavar "INPUT" <> help "Input file to process")
-    <*> argument str (metavar "OUTPUT" <> help "Name for the output file")
+    Job
+        <$> argument str (metavar "INPUT" <> help "Input file to process")
+        <*> argument str (metavar "OUTPUT" <> help "Name for the output file")
+        <*> optional
+            ( strOption
+                ( long "ast-out"
+                    <> metavar "AST_FILE"
+                    <> help "Optional file to output the AST to"
+                )
+            )
+        <*> optional
+            ( strOption
+                ( long "aasm-out"
+                    <> metavar "AASM-FILE"
+                    <> help "Optional file to output the AASM to"
+                )
+            )
 
 jobParser :: ParserInfo Job
 jobParser =
-  info
-    (jobP <**> helper)
-    (fullDesc
-       <> progDesc "Compile L1 programs to a simple abstract assembly language"
-       <> header "An simple starter compiler for the L1 language")
+    info
+        (jobP <**> helper)
+        ( fullDesc
+            <> progDesc "Compile L1 programs to a simple abstract assembly language"
+            <> header "An simple starter compiler for the L1 language"
+        )
 
 validateJob :: Job -> L1ExceptT Job
 validateJob job = do
-  let sourceFile = src job
-  exists <- liftIO $ doesFileExist sourceFile
-  unless exists $ generalFail ("File " ++ sourceFile ++ " does not exist :(") 1
-  return job
+    let sourceFile = src job
+    exists <- liftIO $ doesFileExist sourceFile
+    unless exists $ generalFail ("File " ++ sourceFile ++ " does not exist :(") 1
+    return job

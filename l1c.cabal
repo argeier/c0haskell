@@ -3,7 +3,7 @@ name:               l1c
 version:            0.1.0.0
 
 synopsis: Simple toy compiler
-description: This was developed for the lecture 'Compiler Design' in the summer term 2025 by André Platzer at KIT Karlsruhe
+description: This was developed for the lecture 'Compiler Design' in the summer term 2025 by André Platzer at KIT Karlsruhe
 
 author:             Darius Schefer
 maintainer:         darius.schefer@student.kit.edu
@@ -25,11 +25,15 @@ executable l1c
                   mtl,
                   optparse-applicative >= 0.18.1.0,
                   parser-combinators,
+                  process,
                   transformers
     other-modules:
                   Args,
                   Compile,
                   Compile.AST,
+                  Compile.X86,
+                  Compile.InstructionSelection,
+                  Compile.RegisterAllocation,
                   Compile.Parser,
                   Compile.Semantic,
                   Compile.AAsm,
