@@ -138,7 +138,7 @@ processAAsmInstruction instr
         case parseCondJump rest of
             Just (tempReg, label) -> do
                 regOp <- getOperand tempReg
-                -- Compare with 0 and jump if equal
+                -- Compare register content with 0 and jump if equal
                 emit' "cmp" [regOp, Imm "0"]
                 emit $ "\tje " ++ label
             Nothing -> error $ "Cannot parse conditional jump: " ++ instr
@@ -265,23 +265,21 @@ emitDivMod op destOp src1Op src2Op = do
 -- Handle comparison operations
 emitComparison :: String -> Operand -> Operand -> Operand -> RegAlloc ()
 emitComparison setInstr destOp src1Op src2Op = do
-    let calcReg = case destOp of
-            Reg _ -> destOp
-            _ -> Reg "rax"
+    -- Always use a temporary register for the comparison to avoid conflicts
+    let tempReg = Reg "rax"
     
-    emitMove calcReg src1Op
+    emitMove tempReg src1Op
     case src2Op of
-        Reg _ -> emit' "cmp" [calcReg, src2Op]
-        Mem _ -> emit' "cmp" [calcReg, src2Op]  
-        Imm _ -> emit' "cmp" [calcReg, src2Op]
+        Reg _ -> emit' "cmp" [tempReg, src2Op]
+        Mem _ -> emit' "cmp" [tempReg, src2Op]  
+        Imm _ -> emit' "cmp" [tempReg, src2Op]
     
     -- Set AL based on comparison, then zero-extend to full register
     emit $ "\t" ++ setInstr ++ " al"
     emit "\tmovzx eax, al"
     
-    case destOp of
-        Mem _ -> emitMove destOp (Reg "rax")
-        _ -> return ()
+    -- Move result to destination
+    emitMove destOp (Reg "rax")
 
 -- Handle logical AND (both operands already evaluated)
 emitLogicalAnd :: Operand -> Operand -> Operand -> RegAlloc ()

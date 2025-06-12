@@ -321,8 +321,29 @@ checkExprType (TernaryExpr cond thenExpr elseExpr _) = do
 
 checkReturns :: AST -> L1Semantic ()
 checkReturns (Block stmts _) = do
-    let returns = any isReturn stmts
+    let returns = stmtsReturn stmts
     unless returns $ semanticFail' "Program does not return"
-  where
-    isReturn (Ret _ _) = True
-    isReturn _ = False
+
+-- Check if a list of statements returns
+stmtsReturn :: [Stmt] -> Bool
+stmtsReturn [] = False
+stmtsReturn (stmt:rest) = 
+    if stmtReturns stmt 
+    then True  -- This statement returns, so the sequence returns
+    else stmtsReturn rest  -- Check the rest
+
+-- Check if a single statement returns (following L2 spec)
+stmtReturns :: Stmt -> Bool
+stmtReturns (Decl _ _ _) = False
+stmtReturns (Init _ _ _ _) = False  
+stmtReturns (Asgn _ _ _ _) = False
+stmtReturns (Ret _ _) = True
+stmtReturns (If _ thenStmt elseStmt _) = 
+    case elseStmt of
+        Just elseS -> stmtReturns thenStmt && stmtReturns elseS  -- Both branches must return
+        Nothing -> False  -- If without else doesn't guarantee return
+stmtReturns (While _ _ _) = False  -- While loops don't guarantee return (might not execute)
+stmtReturns (For _ _ _ _ _) = False  -- For loops don't guarantee return  
+stmtReturns (Break _) = False
+stmtReturns (Continue _) = False
+stmtReturns (BlockStmt stmts _) = stmtsReturn stmts

@@ -118,17 +118,28 @@ genStmt (Init _ name e _) = do
     return False
 
 genStmt (Asgn name Nothing e _) = do
-    me <- constEval e
-    r <- freshReg
-    case me of
-        Just v -> do
-            emit $ regName r ++ " = " ++ show v
-            assignVar name r
-            bindConst name v
-        Nothing -> do
-            r' <- genExpr e
-            assignVar name r'
-            clearConst name
+    -- Check if the expression references the variable being assigned
+    -- If so, clear the constant first to avoid incorrect constant folding
+    if exprReferencesVar name e
+    then do
+        clearConst name  -- Clear before evaluation to prevent self-reference issues
+        varReg <- lookupVar name  -- Get current register for the variable
+        r' <- genExpr e
+        -- Emit assignment back to the variable's register to maintain consistency in loops
+        emit $ regName varReg ++ " = " ++ regName r'
+    else do
+        -- Safe to use constant folding
+        me <- constEval e
+        r <- freshReg
+        case me of
+            Just v -> do
+                emit $ regName r ++ " = " ++ show v
+                assignVar name r
+                bindConst name v
+            Nothing -> do
+                r' <- genExpr e
+                assignVar name r'
+                clearConst name
     return False
 
 genStmt (Asgn name (Just op) e _) = do
@@ -367,3 +378,11 @@ genExpr (TernaryExpr cond thenExpr elseExpr _) = do
     
     emit $ endLbl ++ ":"
     return resultReg
+
+-- Check if an expression references a specific variable
+exprReferencesVar :: VarName -> Expr -> Bool
+exprReferencesVar var (Ident name _) = var == name
+exprReferencesVar var (UnExpr _ e) = exprReferencesVar var e
+exprReferencesVar var (BinExpr _ e1 e2) = exprReferencesVar var e1 || exprReferencesVar var e2
+exprReferencesVar var (TernaryExpr e1 e2 e3 _) = exprReferencesVar var e1 || exprReferencesVar var e2 || exprReferencesVar var e3
+exprReferencesVar _ _ = False

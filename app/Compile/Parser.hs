@@ -96,13 +96,15 @@ parseType = choice
 
 stmt :: Parser Stmt
 stmt = choice
-    [ try controlStmt  -- New L2 control statements
-    , try blockStmt    -- Block statements
-    , do
-        s <- try decl <|> try simp <|> ret
+    [ controlStmt      -- Control statements (if, while, for, etc.)
+    , blockStmt        -- Block statements { ... }
+    , semicolonStmt    -- Statements that end with semicolon
+    ] <?> "statement"
+  where
+    semicolonStmt = do
+        s <- choice [try decl, try simp, ret]
         semi
         return s
-    ]
 
 -- New: Block statement
 blockStmt :: Parser Stmt
@@ -114,20 +116,22 @@ blockStmt = do
 -- New: Control flow statements
 controlStmt :: Parser Stmt
 controlStmt = choice
-    [ ifStmt
-    , whileStmt
-    , forStmt
-    , breakStmt
-    , continueStmt
-    ]
+    [ try forStmt      -- Try for first
+    , try ifStmt
+    , try whileStmt
+    , try breakStmt
+    , try continueStmt
+    ] <?> "control statement"
 
 ifStmt :: Parser Stmt
 ifStmt = do
     pos <- getSourcePos
     reserved "if"
-    cond <- parens expr
-    thenStmt <- stmt
-    elseStmt <- optional (reserved "else" >> stmt)
+    cond <- parens expr <?> "if condition"
+    thenStmt <- stmt <?> "then statement"
+    elseStmt <- optional (do
+        reserved "else" <?> "else keyword"
+        stmt <?> "else statement")
     return $ If cond thenStmt elseStmt pos
 
 whileStmt :: Parser Stmt
@@ -143,13 +147,13 @@ forStmt = do
     pos <- getSourcePos
     reserved "for"
     void $ symbol "("
-    forInit <- optional simp
+    forInit <- optional (choice [try decl, simp]) <?> "for loop initializer"
     semi
-    cond <- optional expr
+    cond <- optional expr <?> "for loop condition"
     semi
-    step <- optional simp
+    step <- optional simp <?> "for loop step"
     void $ symbol ")"
-    body <- stmt
+    body <- stmt <?> "for loop body"
     return $ For forInit cond step body pos
 
 breakStmt :: Parser Stmt
@@ -262,22 +266,22 @@ opTable =
     , [ InfixL (BinExpr Add <$ symbol "+")  -- + -
       , InfixL (BinExpr Sub <$ symbol "-")
       ]
-    , [ InfixL (BinExpr Shl <$ symbol "<<")  -- << >>
-      , InfixL (BinExpr Shr <$ symbol ">>")
+    , [ InfixL (BinExpr Shl <$ try (symbol "<<"))  -- << >>
+      , InfixL (BinExpr Shr <$ try (symbol ">>"))
       ]
     , [ InfixL (BinExpr Lt <$ symbol "<")   -- < <= > >=
-      , InfixL (BinExpr Le <$ symbol "<=")
+      , InfixL (BinExpr Le <$ try (symbol "<="))
       , InfixL (BinExpr Gt <$ symbol ">")
-      , InfixL (BinExpr Ge <$ symbol ">=")
+      , InfixL (BinExpr Ge <$ try (symbol ">="))
       ]
-    , [ InfixL (BinExpr Eq <$ symbol "==")  -- == !=
-      , InfixL (BinExpr Ne <$ symbol "!=")
+    , [ InfixL (BinExpr Eq <$ try (symbol "=="))  -- == !=
+      , InfixL (BinExpr Ne <$ try (symbol "!="))
       ]
-    , [InfixL (BinExpr BitAnd <$ symbol "&")]  -- &
+    , [InfixL (BinExpr BitAnd <$ try (symbol "&" <* notFollowedBy (char '&')))]  -- & (not &&)
     , [InfixL (BinExpr BitXor <$ symbol "^")]  -- ^
-    , [InfixL (BinExpr BitOr <$ symbol "|")]   -- |
-    , [InfixL (BinExpr And <$ symbol "&&")]    -- &&
-    , [InfixL (BinExpr Or <$ symbol "||")]     -- ||
+    , [InfixL (BinExpr BitOr <$ try (symbol "|" <* notFollowedBy (char '|')))]   -- | (not ||)
+    , [InfixL (BinExpr And <$ try (symbol "&&"))]    -- &&
+    , [InfixL (BinExpr Or <$ try (symbol "||"))]     -- ||
     ]
   where
     -- this allows us to parse `---x` as `-(-(-x))`
