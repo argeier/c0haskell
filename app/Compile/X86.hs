@@ -10,7 +10,7 @@ import Control.Monad.State (
     modify,
  )
 import Data.Char (isDigit)
-import Data.List (intercalate, isPrefixOf)
+import Data.List (intercalate, isPrefixOf, isSuffixOf)
 import qualified Data.Map as Map
 import Text.Printf (printf)
 
@@ -123,10 +123,33 @@ processAAsmInstructions = mapM_ processAAsmInstruction
 
 processAAsmInstruction :: String -> RegAlloc ()
 processAAsmInstruction instr
+    -- Handle labels (e.g., "label_name:")
+    | ":" `isSuffixOf` instr = do
+        emit $ instr  -- Just emit the label as-is
+    
+    -- Handle unconditional jumps (e.g., "goto label_name")
+    | "goto " `isPrefixOf` instr = do
+        let label = trim $ drop 5 instr
+        emit $ "\tjmp " ++ label
+    
+    -- Handle conditional jumps (e.g., "if %1 == 0 goto label_name")
+    | "if " `isPrefixOf` instr = do
+        let rest = trim $ drop 3 instr
+        case parseCondJump rest of
+            Just (tempReg, label) -> do
+                regOp <- getOperand tempReg
+                -- Compare with 0 and jump if equal
+                emit' "cmp" [regOp, Imm "0"]
+                emit $ "\tje " ++ label
+            Nothing -> error $ "Cannot parse conditional jump: " ++ instr
+    
+    -- Handle return statements
     | "ret " `isPrefixOf` instr = do
         let tempSrcStr = trim $ drop 4 instr
         srcOp <- getOperand tempSrcStr
         emitMove (Reg "rax") srcOp
+    
+    -- Handle regular assignments and operations
     | otherwise = case words instr of
         [destTempStr, "=", valStr] | all isDigit valStr || (not (null valStr) && head valStr == '-' && all isDigit (tail valStr)) -> do
             destOp <- getOperand destTempStr
@@ -137,11 +160,10 @@ processAAsmInstruction instr
             destOp <- getOperand destTempStr
             srcOp <- getOperand srcTempStr
             emitMove destOp srcOp
-        [destTempStr, "=", opStr, src1TempStr] | opStr == "-" -> do
+        [destTempStr, "=", opStr, src1TempStr] | opStr `elem` unaryOps -> do
             destOp <- getOperand destTempStr
             src1Op <- getOperand src1TempStr
-            emitMove destOp src1Op
-            emitUnaryOp "neg" destOp
+            processUnaryOp destOp opStr src1Op
         [destTempStr, "=", src1TempStr, opStr, src2TempStr] -> do
             destOp <- getOperand destTempStr
             src1Op <- getOperand src1TempStr
@@ -154,51 +176,183 @@ processAAsmInstruction instr
             processBinOp destAsSrc1Op destAsSrc1Op opStr src2Op
         _ -> error $ "Cannot parse AAsm instruction: " ++ instr
 
+-- Parse conditional jump format: "%reg == 0 goto label"
+parseCondJump :: String -> Maybe (String, String)
+parseCondJump s = case words s of
+    [reg, "==", "0", "goto", label] -> Just (reg, label)
+    _ -> Nothing
+
+-- List of unary operators
+unaryOps :: [String]
+unaryOps = ["-", "!", "~"]
+
+-- List of binary operators  
+binaryOps :: [String]
+binaryOps = ["+", "-", "*", "/", "%", "<", "<=", ">", ">=", "==", "!=", "&&", "||", "&", "^", "|", "<<", ">>"]
+
+processUnaryOp :: Operand -> String -> Operand -> RegAlloc ()
+processUnaryOp destOp opStr srcOp = do
+    case opStr of
+        "-" -> do
+            emitMove destOp srcOp
+            emitUnaryOp "neg" destOp
+        "!" -> do
+            -- Logical NOT: convert non-zero to 0, zero to 1
+            emitMove destOp srcOp
+            emit' "cmp" [destOp, Imm "0"]
+            emit "\tsete al"  -- Set AL to 1 if zero, 0 otherwise
+            emit "\tmovzx eax, al"  -- Zero-extend AL to EAX
+            emitMove destOp (Reg "rax")
+        "~" -> do
+            emitMove destOp srcOp
+            emitUnaryOp "not" destOp
+        _ -> error $ "Unsupported unary operator: " ++ opStr
+
 processBinOp :: Operand -> Operand -> String -> Operand -> RegAlloc ()
 processBinOp destOp src1Op opStr actualSrc2Op =
     case opStr of
         "+" -> emitBinaryFinal "add" destOp src1Op actualSrc2Op
         "-" -> emitBinaryFinal "sub" destOp src1Op actualSrc2Op
         "*" -> emitBinaryFinal "imul" destOp src1Op actualSrc2Op
-        "/" -> do
-            emit "\tpush rdx"
-            emitMove (Reg "rax") src1Op
-
-            let prepareDivisor = case actualSrc2Op of
-                    Reg rName | rName == "rax" || rName == "rdx" -> do
-                        emitMove (Reg "rcx") actualSrc2Op
-                        return (Reg "rcx")
-                    Reg _ -> return actualSrc2Op
-                    Mem _ -> return actualSrc2Op
-                    Imm _ -> do
-                        emitMove (Reg "rcx") actualSrc2Op
-                        return (Reg "rcx")
-
-            divisorOp <- prepareDivisor
-            emit "\tcdq"
-            emit' "idiv" [divisorOp]
-            emitMove destOp (Reg "rax")
-            emit "\tpop rdx"
-        "%" -> do
-            emit "\tpush rdx"
-            emitMove (Reg "rax") src1Op
-            let prepareDivisor = case actualSrc2Op of
-                    Reg rName | rName == "rax" || rName == "rdx" -> do
-                        emitMove (Reg "rcx") actualSrc2Op
-                        return (Reg "rcx")
-                    Reg _ -> return actualSrc2Op
-                    Mem _ -> return actualSrc2Op
-                    Imm _ -> do
-                        emitMove (Reg "rcx") actualSrc2Op
-                        return (Reg "rcx")
-
-            divisorOp <- prepareDivisor
-            emit "\tcdq"
-            emit' "idiv" [divisorOp]
-
-            emitMove destOp (Reg "rdx")
-            emit "\tpop rdx"
+        "/" -> emitDivMod "div" destOp src1Op actualSrc2Op
+        "%" -> emitDivMod "mod" destOp src1Op actualSrc2Op
+        -- Comparison operators
+        "<" -> emitComparison "setl" destOp src1Op actualSrc2Op
+        "<=" -> emitComparison "setle" destOp src1Op actualSrc2Op
+        ">" -> emitComparison "setg" destOp src1Op actualSrc2Op
+        ">=" -> emitComparison "setge" destOp src1Op actualSrc2Op
+        "==" -> emitComparison "sete" destOp src1Op actualSrc2Op
+        "!=" -> emitComparison "setne" destOp src1Op actualSrc2Op
+        -- Logical operators (short-circuit evaluation already handled in AAsm)
+        "&&" -> emitLogicalAnd destOp src1Op actualSrc2Op
+        "||" -> emitLogicalOr destOp src1Op actualSrc2Op
+        -- Bitwise operators
+        "&" -> emitBinaryFinal "and" destOp src1Op actualSrc2Op
+        "^" -> emitBinaryFinal "xor" destOp src1Op actualSrc2Op
+        "|" -> emitBinaryFinal "or" destOp src1Op actualSrc2Op
+        -- Shift operators
+        "<<" -> emitShift "sal" destOp src1Op actualSrc2Op
+        ">>" -> emitShift "sar" destOp src1Op actualSrc2Op
         _ -> error $ "Unsupported binary AAsm operator: " ++ opStr
+
+-- Handle division and modulo
+emitDivMod :: String -> Operand -> Operand -> Operand -> RegAlloc ()
+emitDivMod op destOp src1Op src2Op = do
+    emit "\tpush rdx"
+    emitMove (Reg "rax") src1Op
+
+    let prepareDivisor = case src2Op of
+            Reg rName | rName == "rax" || rName == "rdx" -> do
+                emitMove (Reg "rcx") src2Op
+                return (Reg "rcx")
+            Reg _ -> return src2Op
+            Mem _ -> return src2Op
+            Imm _ -> do
+                emitMove (Reg "rcx") src2Op
+                return (Reg "rcx")
+
+    divisorOp <- prepareDivisor
+    emit "\tcdq"
+    emit' "idiv" [divisorOp]
+    
+    case op of
+        "div" -> emitMove destOp (Reg "rax")  -- Quotient in RAX
+        "mod" -> emitMove destOp (Reg "rdx")  -- Remainder in RDX
+        _ -> error $ "Unknown div/mod operation: " ++ op
+    
+    emit "\tpop rdx"
+
+-- Handle comparison operations
+emitComparison :: String -> Operand -> Operand -> Operand -> RegAlloc ()
+emitComparison setInstr destOp src1Op src2Op = do
+    let calcReg = case destOp of
+            Reg _ -> destOp
+            _ -> Reg "rax"
+    
+    emitMove calcReg src1Op
+    case src2Op of
+        Reg _ -> emit' "cmp" [calcReg, src2Op]
+        Mem _ -> emit' "cmp" [calcReg, src2Op]  
+        Imm _ -> emit' "cmp" [calcReg, src2Op]
+    
+    -- Set AL based on comparison, then zero-extend to full register
+    emit $ "\t" ++ setInstr ++ " al"
+    emit "\tmovzx eax, al"
+    
+    case destOp of
+        Mem _ -> emitMove destOp (Reg "rax")
+        _ -> return ()
+
+-- Handle logical AND (both operands already evaluated)
+emitLogicalAnd :: Operand -> Operand -> Operand -> RegAlloc ()
+emitLogicalAnd destOp src1Op src2Op = do
+    let calcReg = case destOp of
+            Reg _ -> destOp  
+            _ -> Reg "rax"
+    
+    -- Convert operands to 0/1 then multiply
+    emitMove calcReg src1Op
+    emit' "cmp" [calcReg, Imm "0"]
+    emit "\tsetne al"
+    emit "\tmovzx eax, al"
+    emitMove calcReg (Reg "rax")
+    
+    let tempReg = Reg "rcx"
+    emitMove tempReg src2Op
+    emit' "cmp" [tempReg, Imm "0"]
+    emit "\tsetne cl"
+    emit "\tmovzx ecx, cl"
+    
+    emit' "imul" [calcReg, tempReg]
+    
+    case destOp of
+        Mem _ -> emitMove destOp calcReg
+        _ -> return ()
+
+-- Handle logical OR (both operands already evaluated)
+emitLogicalOr :: Operand -> Operand -> Operand -> RegAlloc ()
+emitLogicalOr destOp src1Op src2Op = do
+    let calcReg = case destOp of
+            Reg _ -> destOp
+            _ -> Reg "rax"
+    
+    -- OR the operands, then convert result to 0/1
+    emitMove calcReg src1Op
+    case src2Op of
+        Reg _ -> emit' "or" [calcReg, src2Op]
+        Mem _ -> emit' "or" [calcReg, src2Op]
+        Imm _ -> emit' "or" [calcReg, src2Op]
+    
+    emit' "cmp" [calcReg, Imm "0"]
+    emit "\tsetne al"
+    emit "\tmovzx eax, al"
+    emitMove calcReg (Reg "rax")
+    
+    case destOp of
+        Mem _ -> emitMove destOp calcReg
+        _ -> return ()
+
+-- Handle shift operations
+emitShift :: String -> Operand -> Operand -> Operand -> RegAlloc ()
+emitShift shiftInstr destOp src1Op src2Op = do
+    let calcReg = case destOp of
+            Reg _ -> destOp
+            _ -> Reg "rax"
+    
+    emitMove calcReg src1Op
+    
+    -- Shift amount must be in CL register or immediate
+    case src2Op of
+        Imm i -> emit' shiftInstr [calcReg, Imm i]
+        _ -> do
+            emit "\tpush rcx"
+            emitMove (Reg "rcx") src2Op
+            emit' shiftInstr [calcReg, Reg "cl"]  -- Use CL (low 8 bits of RCX)
+            emit "\tpop rcx"
+    
+    case destOp of
+        Mem _ -> emitMove destOp calcReg
+        _ -> return ()
 
 emitMove :: Operand -> Operand -> RegAlloc ()
 emitMove dest@(Reg destReg64) src@(Reg srcReg64)

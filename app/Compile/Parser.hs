@@ -3,7 +3,7 @@ module Compile.Parser (
     parseNumber,
 ) where
 
-import Compile.AST (AST (..), Expr (..), Op (..), Stmt (..))
+import Compile.AST (AST (..), Expr (..), Op (..), Stmt (..), Type (..))
 import Error (L1ExceptT, parserFail)
 
 import Control.Monad.Combinators.Expr (
@@ -27,6 +27,7 @@ import Text.Megaparsec (
     getSourcePos,
     many,
     oneOf,
+    optional,
     parse,
     satisfy,
     some,
@@ -86,11 +87,84 @@ astParser = do
     eof
     return mainBlock
 
+-- Parse type for L2
+parseType :: Parser Type
+parseType = choice
+    [ IntType <$ reserved "int"
+    , BoolType <$ reserved "bool"
+    ] <?> "type"
+
 stmt :: Parser Stmt
-stmt = do
-    s <- try decl <|> try simp <|> ret
+stmt = choice
+    [ try controlStmt  -- New L2 control statements
+    , try blockStmt    -- Block statements
+    , do
+        s <- try decl <|> try simp <|> ret
+        semi
+        return s
+    ]
+
+-- New: Block statement
+blockStmt :: Parser Stmt
+blockStmt = do
+    pos <- getSourcePos
+    stmts <- braces (many stmt)
+    return $ BlockStmt stmts pos
+
+-- New: Control flow statements
+controlStmt :: Parser Stmt
+controlStmt = choice
+    [ ifStmt
+    , whileStmt
+    , forStmt
+    , breakStmt
+    , continueStmt
+    ]
+
+ifStmt :: Parser Stmt
+ifStmt = do
+    pos <- getSourcePos
+    reserved "if"
+    cond <- parens expr
+    thenStmt <- stmt
+    elseStmt <- optional (reserved "else" >> stmt)
+    return $ If cond thenStmt elseStmt pos
+
+whileStmt :: Parser Stmt
+whileStmt = do
+    pos <- getSourcePos
+    reserved "while"
+    cond <- parens expr
+    body <- stmt
+    return $ While cond body pos
+
+forStmt :: Parser Stmt
+forStmt = do
+    pos <- getSourcePos
+    reserved "for"
+    void $ symbol "("
+    forInit <- optional simp
     semi
-    return s
+    cond <- optional expr
+    semi
+    step <- optional simp
+    void $ symbol ")"
+    body <- stmt
+    return $ For forInit cond step body pos
+
+breakStmt :: Parser Stmt
+breakStmt = do
+    pos <- getSourcePos
+    reserved "break"
+    semi
+    return $ Break pos
+
+continueStmt :: Parser Stmt
+continueStmt = do
+    pos <- getSourcePos
+    reserved "continue"
+    semi
+    return $ Continue pos
 
 decl :: Parser Stmt
 decl = try declInit <|> declNoInit
@@ -98,18 +172,18 @@ decl = try declInit <|> declNoInit
 declNoInit :: Parser Stmt
 declNoInit = do
     pos <- getSourcePos
-    reserved "int"
+    typ <- parseType
     name <- identifier
-    return $ Decl name pos
+    return $ Decl typ name pos
 
 declInit :: Parser Stmt
 declInit = do
     pos <- getSourcePos
-    reserved "int"
+    typ <- parseType
     name <- identifier
     void $ symbol "="
     e <- expr
-    return $ Init name e pos
+    return $ Init typ name e pos
 
 simp :: Parser Stmt
 simp = do
@@ -119,6 +193,7 @@ simp = do
     e <- expr
     return $ Asgn name op e pos
 
+-- Extended assignment operators for L2
 asnOp :: Parser (Maybe Op)
 asnOp =
     do
@@ -129,6 +204,11 @@ asnOp =
             "-=" -> pure (Just Sub)
             "/=" -> pure (Just Div)
             "%=" -> pure (Just Mod)
+            "&=" -> pure (Just BitAnd)
+            "^=" -> pure (Just BitXor)
+            "|=" -> pure (Just BitOr)
+            "<<=" -> pure (Just Shl)
+            ">>=" -> pure (Just Shr)
             "=" -> pure Nothing
             x -> fail $ "Nonexistent assignment operator: " ++ x
         <?> "assignment operator"
@@ -140,8 +220,14 @@ ret = do
     e <- expr
     return $ Ret e pos
 
+-- Base expressions
 expr' :: Parser Expr
-expr' = parens expr <|> intExpr <|> identExpr
+expr' = choice
+    [ parens expr
+    , boolExpr     -- New: boolean literals
+    , intExpr
+    , identExpr
+    ]
 
 intExpr :: Parser Expr
 intExpr = do
@@ -149,29 +235,77 @@ intExpr = do
     str <- numberLiteral
     return $ IntExpr str pos
 
+-- New: Boolean expressions
+boolExpr :: Parser Expr
+boolExpr = do
+    pos <- getSourcePos
+    b <- choice
+        [ True <$ reserved "true"
+        , False <$ reserved "false"
+        ]
+    return $ BoolExpr b pos
+
 identExpr :: Parser Expr
 identExpr = do
     pos <- getSourcePos
     name <- identifier
     return $ Ident name pos
 
+-- Updated operator precedence table for L2
 opTable :: [[Operator Parser Expr]]
 opTable =
-    [ [Prefix manyUnaryOp]
-    ,
-        [ InfixL (BinExpr Mul <$ symbol "*")
-        , InfixL (BinExpr Div <$ symbol "/")
-        , InfixL (BinExpr Mod <$ symbol "%")
-        ]
-    , [InfixL (BinExpr Add <$ symbol "+"), InfixL (BinExpr Sub <$ symbol "-")]
+    [ [Prefix manyUnaryOp]  -- Unary operators: ! ~ -
+    , [ InfixL (BinExpr Mul <$ symbol "*")  -- * / %
+      , InfixL (BinExpr Div <$ symbol "/")
+      , InfixL (BinExpr Mod <$ symbol "%")
+      ]
+    , [ InfixL (BinExpr Add <$ symbol "+")  -- + -
+      , InfixL (BinExpr Sub <$ symbol "-")
+      ]
+    , [ InfixL (BinExpr Shl <$ symbol "<<")  -- << >>
+      , InfixL (BinExpr Shr <$ symbol ">>")
+      ]
+    , [ InfixL (BinExpr Lt <$ symbol "<")   -- < <= > >=
+      , InfixL (BinExpr Le <$ symbol "<=")
+      , InfixL (BinExpr Gt <$ symbol ">")
+      , InfixL (BinExpr Ge <$ symbol ">=")
+      ]
+    , [ InfixL (BinExpr Eq <$ symbol "==")  -- == !=
+      , InfixL (BinExpr Ne <$ symbol "!=")
+      ]
+    , [InfixL (BinExpr BitAnd <$ symbol "&")]  -- &
+    , [InfixL (BinExpr BitXor <$ symbol "^")]  -- ^
+    , [InfixL (BinExpr BitOr <$ symbol "|")]   -- |
+    , [InfixL (BinExpr And <$ symbol "&&")]    -- &&
+    , [InfixL (BinExpr Or <$ symbol "||")]     -- ||
     ]
   where
     -- this allows us to parse `---x` as `-(-(-x))`
     -- makeExprParser doesn't do this by default
-    manyUnaryOp = foldr1 (.) <$> some (UnExpr Neg <$ symbol "-")
+    manyUnaryOp = foldr1 (.) <$> some unaryOpChoice
+    unaryOpChoice = choice 
+        [ UnExpr Neg <$ symbol "-"
+        , UnExpr Not <$ symbol "!"
+        , UnExpr BitNot <$ symbol "~"
+        ]
 
 expr :: Parser Expr
-expr = makeExprParser expr' opTable <?> "expression"
+expr = ternaryExpr <?> "expression"
+
+-- Handle ternary operator separately since makeExprParser doesn't support it well
+ternaryExpr :: Parser Expr
+ternaryExpr = do
+    e1 <- makeExprParser expr' opTable
+    pos <- getSourcePos
+    maybeTernary <- optional $ do
+        void $ symbol "?"
+        e2 <- ternaryExpr
+        void $ symbol ":"
+        e3 <- ternaryExpr
+        return $ TernaryExpr e1 e2 e3 pos
+    case maybeTernary of
+        Nothing -> return e1
+        Just ternary -> return ternary
 
 -- Lexer starts here, probably worth moving to its own file at some point
 sc :: Parser ()
@@ -237,19 +371,20 @@ hexadecimal = do
 reserved :: String -> Parser ()
 reserved w = void $ lexeme (string w <* notFollowedBy identLetter)
 
+-- Updated reserved words for L2
 reservedWords :: [String]
 reservedWords =
     [ "alloc"
     , "alloc_array"
     , "assert"
-    , "bool"
-    , "break"
+    , "bool"      -- New for L2
+    , "break"     -- New for L2
     , "char"
-    , "continue"
-    , "else"
-    , "false"
-    , "for"
-    , "if"
+    , "continue"  -- New for L2
+    , "else"      -- New for L2
+    , "false"     -- New for L2
+    , "for"       -- New for L2
+    , "if"        -- New for L2
     , "int"
     , "NULL"
     , "print"
@@ -257,12 +392,12 @@ reservedWords =
     , "return"
     , "string"
     , "struct"
-    , "true"
+    , "true"      -- New for L2
     , "void"
-    , "while"
+    , "while"     -- New for L2
     ]
 
--- Operations
+-- Operations - extended for L2
 opStart :: Parser Char
 opStart = oneOf "=+-*/%&^|<>!~"
 
