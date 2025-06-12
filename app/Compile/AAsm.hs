@@ -6,6 +6,7 @@ import Compile.AST (AST (..), Expr (..), Op (..), Stmt (..))
 import Compile.Parser (parseNumber)
 
 import Control.Monad.State (State, execState, get, gets, modify, put)
+import Control.Monad (unless)
 import Data.Bits ((.&.), (.|.), xor, complement, shiftL, shiftR)
 import qualified Data.Map as Map
 
@@ -166,8 +167,8 @@ genStmt (If cond thenStmt elseStmt _) = do
     -- Generate then branch
     thenReturns <- genStmt thenStmt
     
-    -- Jump to end if we didn't return
-    if not thenReturns then emit $ "goto " ++ endLbl else return ()
+    -- Only jump to end if the then branch didn't return
+    unless thenReturns $ emit $ "goto " ++ endLbl
     
     -- Else branch
     emit $ elseLbl ++ ":"
@@ -175,7 +176,9 @@ genStmt (If cond thenStmt elseStmt _) = do
         Just stmt -> genStmt stmt
         Nothing -> return False
     
-    emit $ endLbl ++ ":"
+    -- Only emit end label if at least one branch doesn't return
+    unless (thenReturns && elseReturns) $ emit $ endLbl ++ ":"
+    
     return (thenReturns && elseReturns)
 
 genStmt (While cond body _) = do

@@ -49,6 +49,7 @@ data RegState = RegState
     , freeRegs :: [String]
     , stackSlots :: Int
     , instructions :: [String]
+    , totalStackBytes :: Int  -- Track total allocated stack for proper cleanup
     }
 
 type RegAlloc a = State RegState a
@@ -60,15 +61,20 @@ initialState =
         , freeRegs = ["rbx", "rcx", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"]
         , stackSlots = 0
         , instructions = []
+        , totalStackBytes = 0
         }
 
 generateX86 :: [String] -> [String]
 generateX86 aasm = [".intel_syntax noprefix"] ++ prologue ++ body ++ epilogue
   where
-    finalState = execState (processAAsmInstructions aasm) initialState
-    stackRequiredBytes = stackSlots finalState * 8
+    -- First pass: calculate stack requirements
+    tempState = execState (processAAsmInstructions aasm) initialState
+    stackRequiredBytes = stackSlots tempState * 8
     alignedStackBytes = if stackRequiredBytes > 0 then ((stackRequiredBytes + 15) `div` 16) * 16 else 0
-
+    
+    -- Second pass: process with known stack size
+    finalState = execState (processAAsmInstructions aasm) (initialState { totalStackBytes = alignedStackBytes })
+    
     body = reverse $ instructions finalState
 
     prologue =
@@ -85,11 +91,17 @@ generateX86 aasm = [".intel_syntax noprefix"] ++ prologue ++ body ++ epilogue
         ]
             ++ ([printf "\tsub rsp, %d" alignedStackBytes | alignedStackBytes > 0])
 
-    epilogue =
-        ([printf "\tadd rsp, %d" alignedStackBytes | alignedStackBytes > 0])
-            ++ [ "\tpop rbp"
-               , "\tret"
-               ]
+    epilogue = 
+        -- Only generate epilogue if there are instructions that don't end with ret
+        if not (endsWithRet body) then
+            ([printf "\tadd rsp, %d" alignedStackBytes | alignedStackBytes > 0])
+                ++ [ "\tpop rbp"
+                   , "\tret"
+                   ]
+        else []
+    
+    endsWithRet [] = False  
+    endsWithRet (x:_) = "\tret" `isPrefixOf` x  -- Check first instruction (remember body is reversed)
 
 emit :: String -> RegAlloc ()
 emit instr = modify $ \s -> s{instructions = instr : instructions s}
@@ -148,6 +160,13 @@ processAAsmInstruction instr
         let tempSrcStr = trim $ drop 4 instr
         srcOp <- getOperand tempSrcStr
         emitMove (Reg "rax") srcOp
+        -- Actually return! Restore stack properly
+        st <- get
+        let stackBytes = totalStackBytes st
+        -- Restore stack space if any was allocated
+        when (stackBytes > 0) $ emit $ printf "\tadd rsp, %d" stackBytes
+        emit "\tpop rbp"
+        emit "\tret"
     
     -- Handle regular assignments and operations
     | otherwise = case words instr of
@@ -185,10 +204,6 @@ parseCondJump s = case words s of
 -- List of unary operators
 unaryOps :: [String]
 unaryOps = ["-", "!", "~"]
-
--- List of binary operators  
-binaryOps :: [String]
-binaryOps = ["+", "-", "*", "/", "%", "<", "<=", ">", ">=", "==", "!=", "&&", "||", "&", "^", "|", "<<", ">>"]
 
 processUnaryOp :: Operand -> String -> Operand -> RegAlloc ()
 processUnaryOp destOp opStr srcOp = do
