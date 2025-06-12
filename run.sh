@@ -1,3 +1,3 @@
 #!/bin/bash
 set -e
-cabal run l1c -- $@
+cabal run c0haskell -- $@

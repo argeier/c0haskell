@@ -1,12 +1,12 @@
 cabal-version:      3.0
-name:               l1c
+name:               c0haskell
 version:            0.1.0.0
 
 synopsis: Simple toy compiler
 description: This was developed for the lecture 'Compiler Design' in the summer term 2025 by André Platzer at KIT Karlsruhe
 
-author:             Darius Schefer
-maintainer:         darius.schefer@student.kit.edu
+author:             Arthur Geier
+maintainer:         arthur.geier@student.kit.edu
 
 build-type:         Simple
 

@@ -8,3 +8,4 @@ cabal.project.local~
 # Ignore the entire test folder
 /test/
 /tests/
+
