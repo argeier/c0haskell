@@ -72,6 +72,13 @@ withLoop loopStatus action = do
     ctx' <- get
     put ctx' { inLoop = inLoop ctx }  -- Restore original loop status
     return result
+    
+withScope :: L1Semantic a -> L1Semantic a
+withScope action = do
+    originalNamespace <- getNamespace
+    result <- action
+    putNamespace originalNamespace
+    return result
 
 -- Extended statement checking for L2
 checkStmt :: Stmt -> L1Semantic ()
@@ -163,25 +170,26 @@ checkStmt (While cond body _) = do
     withLoop True $ checkStmt body
 
 checkStmt (For maybeInit maybeCond maybeStep body _) = do
-    -- Check initializer
-    case maybeInit of
-        Just initStmt -> checkStmt initStmt
-        Nothing -> return ()
-    
-    -- Check condition
-    case maybeCond of
-        Just condExpr -> do
-            condType <- checkExprType condExpr
-            unless (condType == BoolType) $
-                semanticFail' "For loop condition must be a boolean expression"
-        Nothing -> return ()
-    
-    -- Check step and body in loop context
-    withLoop True $ do
-        case maybeStep of
-            Just stepStmt -> checkStmt stepStmt
+    withScope $ do -- Create a new scope for the whole for-loop construct
+        -- Check initializer
+        case maybeInit of
+            Just initStmt -> checkStmt initStmt
             Nothing -> return ()
-        checkStmt body
+
+        -- Check condition
+        case maybeCond of
+            Just condExpr -> do
+                condType <- checkExprType condExpr
+                unless (condType == BoolType) $
+                    semanticFail' "For loop condition must be a boolean expression"
+            Nothing -> return ()
+
+        -- Check step and body in loop context
+        withLoop True $ do
+            case maybeStep of
+                Just stepStmt -> checkStmt stepStmt
+                Nothing -> return ()
+            checkStmt body
 
 checkStmt (Break pos) = do
     inLoopNow <- isInLoop
@@ -193,7 +201,7 @@ checkStmt (Continue pos) = do
     unless inLoopNow $
         semanticFail' $ "Continue statement outside of loop at: " ++ posPretty pos
 
-checkStmt (BlockStmt stmts _) = mapM_ checkStmt stmts
+checkStmt (BlockStmt stmts _) = withScope $ mapM_ checkStmt stmts
 
 -- Type checking for expressions
 checkExprType :: Expr -> L1Semantic Type

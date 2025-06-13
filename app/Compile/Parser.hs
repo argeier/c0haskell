@@ -81,7 +81,7 @@ astParser = do
     parens $ pure ()
     mainBlock <- braces $ do
         pos <- getSourcePos
-        stmts <- many stmt
+        stmts <- many (stmt <?> "statement in main block")
         return $ Block stmts pos
     sc -- Consume trailing whitespace
     eof
@@ -96,9 +96,13 @@ parseType = choice
 
 stmt :: Parser Stmt
 stmt = choice
-    [ controlStmt      -- Control statements (if, while, for, etc.)
-    , blockStmt        -- Block statements { ... }
-    , semicolonStmt    -- Statements that end with semicolon
+    [ try forStmt          -- Try for first, explicitly
+    , try ifStmt           -- Then other control statements
+    , try whileStmt
+    , try breakStmt
+    , try continueStmt
+    , try blockStmt        -- Block statements { ... }
+    , semicolonStmt        -- Statements that end with semicolon
     ] <?> "statement"
   where
     semicolonStmt = do
@@ -112,16 +116,6 @@ blockStmt = do
     pos <- getSourcePos
     stmts <- braces (many stmt)
     return $ BlockStmt stmts pos
-
--- New: Control flow statements
-controlStmt :: Parser Stmt
-controlStmt = choice
-    [ try forStmt      -- Try for first
-    , try ifStmt
-    , try whileStmt
-    , try breakStmt
-    , try continueStmt
-    ] <?> "control statement"
 
 ifStmt :: Parser Stmt
 ifStmt = do
@@ -151,7 +145,7 @@ forStmt = do
     semi
     cond <- optional expr <?> "for loop condition"
     semi
-    step <- optional simp <?> "for loop step"
+    step <- optional (choice [try decl, simp]) <?> "for loop step"
     void $ symbol ")"
     body <- stmt <?> "for loop body"
     return $ For forInit cond step body pos
@@ -269,10 +263,10 @@ opTable =
     , [ InfixL (BinExpr Shl <$ try (symbol "<<"))  -- << >>
       , InfixL (BinExpr Shr <$ try (symbol ">>"))
       ]
-    , [ InfixL (BinExpr Lt <$ symbol "<")   -- < <= > >=
-      , InfixL (BinExpr Le <$ try (symbol "<="))
-      , InfixL (BinExpr Gt <$ symbol ">")
-      , InfixL (BinExpr Ge <$ try (symbol ">="))
+    , [ InfixL (BinExpr Le <$ try (symbol "<="))  -- <= must come before <
+      , InfixL (BinExpr Ge <$ try (symbol ">="))  -- >= must come before >
+      , InfixL (BinExpr Lt <$ symbol "<")         -- < 
+      , InfixL (BinExpr Gt <$ symbol ">")         -- >
       ]
     , [ InfixL (BinExpr Eq <$ try (symbol "=="))  -- == !=
       , InfixL (BinExpr Ne <$ try (symbol "!="))
@@ -387,7 +381,7 @@ reservedWords =
     , "continue"  -- New for L2
     , "else"      -- New for L2
     , "false"     -- New for L2
-    , "for"       -- New for L2
+    , "for"       -- New for L2 ← Make sure this is here
     , "if"        -- New for L2
     , "int"
     , "NULL"

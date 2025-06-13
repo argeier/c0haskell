@@ -310,11 +310,26 @@ emitLogicalAnd destOp src1Op src2Op = do
     emit "\tmovzx eax, al"
     emitMove calcReg (Reg "rax")
     
-    let tempReg = Reg "rcx"
+    -- Choose temp register that doesn't conflict with inputs
+    let tempReg = case (src1Op, src2Op) of
+            (Reg "rcx", _) -> Reg "rdx"  -- If src1 uses rcx, use rdx
+            (_, Reg "rcx") -> Reg "rdx"  -- If src2 uses rcx, use rdx
+            (Reg "rdx", _) -> Reg "rcx"  -- If src1 uses rdx, use rcx
+            (_, Reg "rdx") -> Reg "rcx"  -- If src2 uses rdx, use rcx
+            _ -> Reg "rcx"               -- Default to rcx
+    
     emitMove tempReg src2Op
     emit' "cmp" [tempReg, Imm "0"]
-    emit "\tsetne cl"
-    emit "\tmovzx ecx, cl"
+    
+    -- Use appropriate 8-bit register based on temp register choice
+    case tempReg of
+        Reg "rcx" -> do
+            emit "\tsetne cl"
+            emit "\tmovzx ecx, cl"
+        Reg "rdx" -> do
+            emit "\tsetne dl" 
+            emit "\tmovzx edx, dl"
+        _ -> error "Unexpected temp register in logical AND"
     
     emit' "imul" [calcReg, tempReg]
     
@@ -331,10 +346,19 @@ emitLogicalOr destOp src1Op src2Op = do
     
     -- OR the operands, then convert result to 0/1
     emitMove calcReg src1Op
-    case src2Op of
-        Reg _ -> emit' "or" [calcReg, src2Op]
-        Mem _ -> emit' "or" [calcReg, src2Op]
-        Imm _ -> emit' "or" [calcReg, src2Op]
+    
+    -- Choose temp register that doesn't conflict
+    let tempReg = case (src1Op, src2Op, calcReg) of
+            (Reg "rcx", _, _) -> Reg "rdx"
+            (_, Reg "rcx", _) -> Reg "rdx"  
+            (_, _, Reg "rcx") -> Reg "rdx"
+            (Reg "rdx", _, _) -> Reg "rcx"
+            (_, Reg "rdx", _) -> Reg "rcx"
+            (_, _, Reg "rdx") -> Reg "rcx"
+            _ -> Reg "rcx"
+    
+    emitMove tempReg src2Op
+    emit' "or" [calcReg, tempReg]
     
     emit' "cmp" [calcReg, Imm "0"]
     emit "\tsetne al"

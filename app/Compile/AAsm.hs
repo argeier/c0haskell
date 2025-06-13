@@ -105,17 +105,26 @@ genStmt (Decl _ name _) = do
     return False
 
 genStmt (Init _ name e _) = do
-    me <- constEval e
-    r <- freshReg
-    case me of
-        Just v -> do
-            emit $ regName r ++ " = " ++ show v
-            assignVar name r
-            bindConst name v
-        Nothing -> do
-            r' <- genExpr e
-            assignVar name r'
-            clearConst name
+    -- Be conservative about constant folding in Init statements
+    -- Only do constant folding if the expression contains no variable references
+    if containsVariableRef e
+    then do
+        r' <- genExpr e
+        assignVar name r'
+        clearConst name
+    else do
+        -- Safe to use constant folding - no variables involved
+        me <- constEval e
+        r <- freshReg
+        case me of
+            Just v -> do
+                emit $ regName r ++ " = " ++ show v
+                assignVar name r
+                bindConst name v
+            Nothing -> do
+                r' <- genExpr e
+                assignVar name r'
+                clearConst name
     return False
 
 genStmt (Asgn name Nothing e _) = do
@@ -389,3 +398,11 @@ exprReferencesVar var (UnExpr _ e) = exprReferencesVar var e
 exprReferencesVar var (BinExpr _ e1 e2) = exprReferencesVar var e1 || exprReferencesVar var e2
 exprReferencesVar var (TernaryExpr e1 e2 e3 _) = exprReferencesVar var e1 || exprReferencesVar var e2 || exprReferencesVar var e3
 exprReferencesVar _ _ = False
+
+-- Check if an expression contains any variable references
+containsVariableRef :: Expr -> Bool
+containsVariableRef (Ident _ _) = True
+containsVariableRef (UnExpr _ e) = containsVariableRef e
+containsVariableRef (BinExpr _ e1 e2) = containsVariableRef e1 || containsVariableRef e2
+containsVariableRef (TernaryExpr e1 e2 e3 _) = containsVariableRef e1 || containsVariableRef e2 || containsVariableRef e3
+containsVariableRef _ = False
