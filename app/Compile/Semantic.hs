@@ -363,3 +363,4 @@ stmtReturns (For _ _ _ _ _) = False  -- For loops don't guarantee return
 stmtReturns (Break _) = False
 stmtReturns (Continue _) = False
 stmtReturns (BlockStmt stmts _) = stmtsReturn stmts
+

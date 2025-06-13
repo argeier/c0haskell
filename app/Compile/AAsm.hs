@@ -354,12 +354,16 @@ genExpr (UnExpr op e) = do
     emit $ regName r ++ " = " ++ show op ++ " " ++ regName r1
     return r
 
-genExpr (BinExpr op e1 e2) = do
-    r1 <- genExpr e1
-    r2 <- genExpr e2
-    r <- freshReg
-    emit $ regName r ++ " = " ++ regName r1 ++ " " ++ show op ++ " " ++ regName r2
-    return r
+genExpr (BinExpr op e1 e2) = case op of
+    And -> genAnd e1 e2
+    Or  -> genOr e1 e2
+    -- All other operators use the old, non-short-circuiting logic
+    _   -> do
+        r1 <- genExpr e1
+        r2 <- genExpr e2
+        r <- freshReg
+        emit $ regName r ++ " = " ++ regName r1 ++ " " ++ show op ++ " " ++ regName r2
+        return r
 
 -- Generate code for ternary operator
 genExpr (TernaryExpr cond thenExpr elseExpr _) = do
@@ -386,18 +390,58 @@ genExpr (TernaryExpr cond thenExpr elseExpr _) = do
     emit $ endLbl ++ ":"
     return resultReg
 
--- Check if an expression references a specific variable
-exprReferencesVar :: VarName -> Expr -> Bool
-exprReferencesVar var (Ident name _) = var == name
-exprReferencesVar var (UnExpr _ e) = exprReferencesVar var e
-exprReferencesVar var (BinExpr _ e1 e2) = exprReferencesVar var e1 || exprReferencesVar var e2
-exprReferencesVar var (TernaryExpr e1 e2 e3 _) = exprReferencesVar var e1 || exprReferencesVar var e2 || exprReferencesVar var e3
-exprReferencesVar _ _ = False
+genAnd :: Expr -> Expr -> CodeGen Register
+genAnd e1 e2 = do
+    resultReg <- freshReg
+    falseLbl <- freshLabel "and_false_"
+    endLbl <- freshLabel "and_end_"
 
--- Check if an expression contains any variable references
-containsVariableRef :: Expr -> Bool
-containsVariableRef (Ident _ _) = True
-containsVariableRef (UnExpr _ e) = containsVariableRef e
-containsVariableRef (BinExpr _ e1 e2) = containsVariableRef e1 || containsVariableRef e2
-containsVariableRef (TernaryExpr e1 e2 e3 _) = containsVariableRef e1 || containsVariableRef e2 || containsVariableRef e3
-containsVariableRef _ = False
+    -- Evaluate LHS
+    r1 <- genExpr e1
+    -- If LHS is false (0), the whole expression is false. Skip RHS.
+    emit $ "if " ++ regName r1 ++ " == 0 goto " ++ falseLbl
+
+    -- LHS was true, so evaluate RHS
+    r2 <- genExpr e2
+    -- If RHS is false (0), the whole expression is false.
+    emit $ "if " ++ regName r2 ++ " == 0 goto " ++ falseLbl
+
+    -- Both LHS and RHS were true
+    emit $ regName resultReg ++ " = 1"
+    emit $ "goto " ++ endLbl
+
+    emit $ falseLbl ++ ":"
+    emit $ regName resultReg ++ " = 0"
+
+    emit $ endLbl ++ ":"
+    return resultReg
+
+genOr :: Expr -> Expr -> CodeGen Register
+genOr e1 e2 = do
+    resultReg <- freshReg
+    checkRhsLbl <- freshLabel "or_rhs_"
+    trueLbl <- freshLabel "or_true_"
+    endLbl <- freshLabel "or_end_"
+
+    -- Evaluate LHS
+    r1 <- genExpr e1
+    -- If LHS is true (non-zero), the whole expression is true. Skip RHS.
+    emit $ "if " ++ regName r1 ++ " == 0 goto " ++ checkRhsLbl
+    emit $ "goto " ++ trueLbl
+
+    -- LHS was false, so evaluate RHS
+    emit $ checkRhsLbl ++ ":"
+    r2 <- genExpr e2
+    -- If RHS is true (non-zero), the whole expression is true.
+    emit $ "if " ++ regName r2 ++ " == 0 goto both_false"
+    emit $ "goto " ++ trueLbl
+
+    emit $ "both_false:"
+    emit $ regName resultReg ++ " = 0"
+    emit $ "goto " ++ endLbl
+
+    emit $ trueLbl ++ ":"
+    emit $ regName resultReg ++ " = 1"
+
+    emit $ endLbl ++ ":"
+    return resultReg
