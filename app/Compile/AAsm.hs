@@ -123,7 +123,8 @@ genStmt (Init _ name e _) = do
     return False
 
 genStmt (Asgn name Nothing e _) = do
-    me <- constEval e
+    let usesItself = varUsedInExpr name e
+    me <- if usesItself then return Nothing else constEval e
     destReg <- lookupVar name
     
     case me of
@@ -134,7 +135,7 @@ genStmt (Asgn name Nothing e _) = do
             srcReg <- genExpr e
             emit $ regName destReg ++ " = " ++ regName srcReg
             clearConst name
-            
+                        
     return False
 
 genStmt (Asgn name (Just op) e _) = do
@@ -405,3 +406,10 @@ genOr e1 e2 = do
 
     emit $ endLbl ++ ":"
     return resultReg
+
+varUsedInExpr :: String -> Expr -> Bool
+varUsedInExpr name (Ident n _) = name == n
+varUsedInExpr name (BinExpr _ e1 e2) = varUsedInExpr name e1 || varUsedInExpr name e2
+varUsedInExpr name (UnExpr _ e) = varUsedInExpr name e
+varUsedInExpr name (TernaryExpr e1 e2 e3 _) = varUsedInExpr name e1 || varUsedInExpr name e2 || varUsedInExpr name e3
+varUsedInExpr _ _ = False

@@ -154,30 +154,39 @@ checkStmt (While cond body _) = do
     withLoop True $ checkStmt body
 
 checkStmt (For maybeInit maybeCond maybeStep body _) = do
-    withScope $ do
-        case maybeInit of
-            Just initStmt -> checkStmt initStmt
-            Nothing -> return ()
+    let needsScope = case maybeInit of
+                       Just (Decl _ _ _) -> True
+                       Just (Init _ _ _ _) -> True  
+                       _ -> False
+    
+    let checkForLoop = do
+          case maybeInit of
+              Just initStmt -> checkStmt initStmt
+              Nothing -> return ()
 
-        case maybeCond of
-            Just condExpr -> do
-                condType <- checkExprType condExpr
-                unless (condType == BoolType) $
-                    semanticFail' "For loop condition must be a boolean expression"
-            Nothing -> return ()
+          case maybeCond of
+              Just condExpr -> do
+                  condType <- checkExprType condExpr
+                  unless (condType == BoolType) $
+                      semanticFail' "For loop condition must be a boolean expression"
+              Nothing -> return ()
 
-        withLoop True $ do
-            checkStmt body
-            
-            case maybeStep of
-                Just (Decl _ _ pos) ->
-                    semanticFail' $ "Declaration not allowed in for-loop step clause at: " ++ posPretty pos
-                Just (Init _ _ _ pos) ->
-                    semanticFail' $ "Declaration not allowed in for-loop step clause at: " ++ posPretty pos
-                Just stepStmt ->
-                    checkStmt stepStmt
-                Nothing ->
-                    return ()
+          withLoop True $ do
+              checkStmt body
+              
+              case maybeStep of
+                  Just (Decl _ _ pos) ->
+                      semanticFail' $ "Declaration not allowed in for-loop step clause at: " ++ posPretty pos
+                  Just (Init _ _ _ pos) ->
+                      semanticFail' $ "Declaration not allowed in for-loop step clause at: " ++ posPretty pos
+                  Just stepStmt ->
+                      checkStmt stepStmt
+                  Nothing ->
+                      return ()
+    
+    if needsScope
+        then withScope checkForLoop
+        else checkForLoop
 
 checkStmt (Break pos) = do
     inLoopNow <- isInLoop

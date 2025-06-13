@@ -9,3 +9,6 @@ cabal.project.local~
 /test/
 /tests/
 
+# Vscode
+.vscode/
+
