@@ -42,7 +42,7 @@ semanticAnalysis ast = do
 
 varStatusAnalysis :: AST -> L1ExceptT SemanticContext
 varStatusAnalysis (Block stmts _) = do
-    finalCtx <- execStateT (mapM_ checkStmt stmts) (SemanticContext Map.empty False)
+    finalCtx <- execStateT (checkStmtsUntilReturn stmts) (SemanticContext Map.empty False)
     return finalCtx
 
 getNamespace :: L1Semantic Namespace
@@ -142,10 +142,25 @@ checkStmt (If cond thenStmt elseStmt _) = do
     condType <- checkExprType cond
     unless (condType == BoolType) $
         semanticFail' "If condition must be a boolean expression"
-    checkStmt thenStmt
+    
     case elseStmt of
-        Just stmt -> checkStmt stmt
-        Nothing -> return ()
+        Just elseS -> do
+            let thenAssigned = findAssignedVars thenStmt
+            let elseAssigned = findAssignedVars elseS
+            let bothAssigned = [v | v <- thenAssigned, v `elem` elseAssigned]
+            checkStmt thenStmt
+            checkStmt elseS
+            ns <- getNamespace
+            let updatedNs = foldr markInitialized ns bothAssigned
+            putNamespace updatedNs
+            
+        Nothing -> do
+            checkStmt thenStmt
+  where
+    markInitialized varName ns = 
+        case Map.lookup varName ns of
+            Just (Declared typ) -> Map.insert varName (Initialized typ) ns
+            _ -> ns
 
 checkStmt (While cond body _) = do
     condType <- checkExprType cond
@@ -342,3 +357,39 @@ stmtReturns (For _ _ _ _ _) = False
 stmtReturns (Break _) = False
 stmtReturns (Continue _) = False
 stmtReturns (BlockStmt stmts _) = stmtsReturn stmts
+
+
+findAssignedVars :: Stmt -> [String]
+findAssignedVars (Asgn name Nothing _ _) = [name]
+findAssignedVars (Asgn name (Just _) _ _) = [name]
+findAssignedVars (If _ thenStmt elseStmt _) = 
+    findAssignedVars thenStmt ++ maybe [] findAssignedVars elseStmt
+findAssignedVars (While _ body _) = findAssignedVars body
+findAssignedVars (For _ _ _ body _) = findAssignedVars body
+findAssignedVars (BlockStmt stmts _) = concatMap findAssignedVars stmts
+findAssignedVars _ = []
+
+
+checkStmtsUntilReturn :: [Stmt] -> L1Semantic ()
+checkStmtsUntilReturn [] = return ()
+checkStmtsUntilReturn (stmt : rest) = do
+    isReturn <- checkStmtReturns stmt
+    if isReturn
+        then return ()
+        else checkStmtsUntilReturn rest
+
+checkStmtReturns :: Stmt -> L1Semantic Bool
+checkStmtReturns stmt@(Ret _ _) = do
+    checkStmt stmt
+    return True
+checkStmtReturns stmt@(If _ thenStmt elseStmt _) = do
+    checkStmt stmt
+    let thenReturns = stmtReturns thenStmt
+    let elseReturns = maybe False stmtReturns elseStmt
+    return (thenReturns && elseReturns)
+checkStmtReturns stmt@(BlockStmt stmts _) = do
+    checkStmt stmt
+    return (stmtsReturn stmts)
+checkStmtReturns stmt = do
+    checkStmt stmt
+    return False

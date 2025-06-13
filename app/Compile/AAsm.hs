@@ -196,6 +196,9 @@ genStmt (For maybeInit maybeCond maybeStep body _) = do
         Just initStmt -> do _ <- genStmt initStmt; return ()
         Nothing -> return ()
     
+    let bodyModified = maybe [] findModifiedVars maybeStep ++ findModifiedVars body
+    mapM_ clearConst bodyModified
+    
     pushLoopLabels endLbl stepLbl
     
     emit $ startLbl ++ ":"
@@ -275,14 +278,8 @@ constEval (BinExpr op l r) = do
                 Add -> Just $ toInt32 (v1 + v2)
                 Sub -> Just $ toInt32 (v1 - v2)
                 Mul -> Just $ toInt32 (v1 * v2)
-                Div ->
-                    if (v2 == 0) || (v1 == (-(2 ^ (31 :: Integer))) && v2 == -1)
-                        then Nothing
-                        else Just $ toInt32 (v1 `quot` v2)
-                Mod ->
-                    if v2 == 0
-                        then Nothing
-                        else Just $ toInt32 (v1 `rem` v2)
+                Div -> Nothing
+                Mod -> Nothing
                 Lt -> Just $ if v1 < v2 then 1 else 0
                 Le -> Just $ if v1 <= v2 then 1 else 0
                 Gt -> Just $ if v1 > v2 then 1 else 0
@@ -413,3 +410,13 @@ varUsedInExpr name (BinExpr _ e1 e2) = varUsedInExpr name e1 || varUsedInExpr na
 varUsedInExpr name (UnExpr _ e) = varUsedInExpr name e
 varUsedInExpr name (TernaryExpr e1 e2 e3 _) = varUsedInExpr name e1 || varUsedInExpr name e2 || varUsedInExpr name e3
 varUsedInExpr _ _ = False
+
+findModifiedVars :: Stmt -> [String]
+findModifiedVars (Asgn name _ _ _) = [name]
+findModifiedVars (Init _ name _ _) = [name]
+findModifiedVars (If _ thenStmt elseStmt _) = 
+    findModifiedVars thenStmt ++ maybe [] findModifiedVars elseStmt  
+findModifiedVars (While _ body _) = findModifiedVars body
+findModifiedVars (For _ _ _ body _) = findModifiedVars body
+findModifiedVars (BlockStmt stmts _) = concatMap findModifiedVars stmts
+findModifiedVars _ = []

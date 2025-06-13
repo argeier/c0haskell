@@ -138,12 +138,12 @@ forStmt = do
     void $ symbol "("
     forInit <- optional (choice [try decl, simp]) <?> "for loop initializer"
     semi
-    cond <- optional expr <?> "for loop condition"
+    cond <- expr <?> "for loop condition"
     semi
     step <- optional (choice [try decl, simp]) <?> "for loop step"
     void $ symbol ")"
     body <- stmt <?> "for loop body"
-    return $ For forInit cond step body pos
+    return $ For forInit (Just cond) step body pos
 
 breakStmt :: Parser Stmt
 breakStmt = do
