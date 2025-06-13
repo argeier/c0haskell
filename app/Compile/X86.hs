@@ -345,23 +345,39 @@ emitLogicalOr destOp src1Op src2Op = do
 
 emitShift :: String -> Operand -> Operand -> Operand -> RegAlloc ()
 emitShift shiftInstr destOp src1Op src2Op = do
-    let calcReg = case destOp of
-            Reg _ -> destOp
-            _ -> Reg "rax"
-    
-    emitMove calcReg src1Op
-    
     case src2Op of
-        Imm i -> emit' shiftInstr [calcReg, Imm i]
+        Imm i -> do
+            let calcReg = case destOp of
+                    Reg _ -> destOp
+                    _ -> Reg "rax"
+            emitMove calcReg src1Op
+            emit' shiftInstr [calcReg, Imm i]
+            case destOp of
+                Mem _ -> emitMove destOp calcReg
+                _ -> return ()
+        
         _ -> do
-            emit "\tpush rcx"
-            emitMove (Reg "rcx") src2Op
-            emit' shiftInstr [calcReg, Reg "cl"]
-            emit "\tpop rcx"
-    
-    case destOp of
-        Mem _ -> emitMove destOp calcReg
-        _ -> return ()
+            case destOp of
+                Reg "rcx" -> do
+                    emitMove (Reg "rax") src1Op
+                    emitMove (Reg "rcx") src2Op
+                    emit' shiftInstr [Reg "rax", Reg "cl"]
+                    emitMove (Reg "rcx") (Reg "rax")
+                
+                _ -> do
+                    let calcReg = case destOp of
+                            Reg _ -> destOp
+                            _ -> Reg "rax"
+                    
+                    emitMove calcReg src1Op
+                    emit "\tpush rcx"
+                    emitMove (Reg "rcx") src2Op
+                    emit' shiftInstr [calcReg, Reg "cl"]
+                    emit "\tpop rcx"
+                    
+                    case destOp of
+                        Mem _ -> emitMove destOp calcReg
+                        _ -> return ()
 
 emitMove :: Operand -> Operand -> RegAlloc ()
 emitMove dest@(Reg destReg64) src@(Reg srcReg64)

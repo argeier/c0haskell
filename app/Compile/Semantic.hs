@@ -171,22 +171,23 @@ checkStmt (If cond thenStmt elseStmt _) = do
     
     case elseStmt of
         Just elseS -> do
-            let thenAssigned = findAssignedVars thenStmt
-            let elseAssigned = findAssignedVars elseS
-            let bothAssigned = [v | v <- thenAssigned, v `elem` elseAssigned]
+            originalNs <- getNamespace
             checkStmt thenStmt
+            thenNs <- getNamespace
+            putNamespace originalNs
             checkStmt elseS
-            ns <- getNamespace
-            let updatedNs = foldr markInitialized ns bothAssigned
-            putNamespace updatedNs
-            
+            elseNs <- getNamespace
+            let finalNs = Map.mapWithKey (updateIfBothInit thenNs elseNs) originalNs
+            putNamespace finalNs
         Nothing -> do
+            savedNs <- getNamespace
             checkStmt thenStmt
+            putNamespace savedNs
   where
-    markInitialized varName ns = 
-        case Map.lookup varName ns of
-            Just (Declared typ) -> Map.insert varName (Initialized typ) ns
-            _ -> ns
+    updateIfBothInit thenNs elseNs varName originalStatus =
+        case (Map.lookup varName thenNs, Map.lookup varName elseNs, originalStatus) of
+            (Just (Initialized typ), Just (Initialized _), Declared _) -> Initialized typ
+            _ -> originalStatus
 
 checkStmt (While cond body _) = do
     condType <- checkExprType cond
@@ -214,8 +215,8 @@ checkStmt (For maybeInit maybeCond maybeStep body _) = do
                       semanticFail' "For loop condition must be a boolean expression"
               Nothing -> return ()
 
+          savedNs <- getNamespace
           withLoop True $ checkStmt body
-              
           case maybeStep of
               Just (Decl _ _ pos) ->
                   semanticFail' $ "Declaration not allowed in for-loop step clause at: " ++ posPretty pos
@@ -223,6 +224,7 @@ checkStmt (For maybeInit maybeCond maybeStep body _) = do
                   semanticFail' $ "Declaration not allowed in for-loop step clause at: " ++ posPretty pos
               Just stepStmt -> checkStmt stepStmt
               Nothing -> return ()
+          putNamespace savedNs
     
     if needsScope
         then withScope checkForLoop
@@ -244,8 +246,7 @@ checkExprType :: Expr -> L1Semantic Type
 checkExprType (IntExpr str pos) = do
     let res = parseNumber str
     case res of
-        Left e -> do
-            semanticFail' $ "Error in " ++ posPretty pos ++ e
+        Left e -> semanticFail' $ "Error in " ++ posPretty pos ++ e
         Right _ -> return IntType
 
 checkExprType (BoolExpr _ _) = return BoolType
@@ -374,16 +375,6 @@ stmtReturns (For _ _ _ _ _) = False
 stmtReturns (Break _) = False
 stmtReturns (Continue _) = False
 stmtReturns (BlockStmt stmts _) = stmtsReturn stmts
-
-findAssignedVars :: Stmt -> [String]
-findAssignedVars (Asgn name Nothing _ _) = [name]
-findAssignedVars (Asgn name (Just _) _ _) = [name]
-findAssignedVars (If _ thenStmt elseStmt _) = 
-    findAssignedVars thenStmt ++ maybe [] findAssignedVars elseStmt
-findAssignedVars (While _ body _) = findAssignedVars body
-findAssignedVars (For _ _ _ body _) = findAssignedVars body
-findAssignedVars (BlockStmt stmts _) = concatMap findAssignedVars stmts
-findAssignedVars _ = []
 
 checkStmtsUntilReturn :: [Stmt] -> L1Semantic ()
 checkStmtsUntilReturn [] = return ()
