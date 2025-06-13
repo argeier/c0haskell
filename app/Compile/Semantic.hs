@@ -36,9 +36,33 @@ semanticFail' :: String -> L1Semantic a
 semanticFail' = lift . semanticFail
 
 semanticAnalysis :: AST -> L1ExceptT ()
-semanticAnalysis ast = do
+semanticAnalysis ast@(Block stmts _) = do
+    evalStateT (checkAllStmts stmts) (SemanticContext Map.empty False)
     ctx <- varStatusAnalysis ast
     evalStateT (checkReturns ast) ctx
+
+checkAllStmts :: [Stmt] -> L1Semantic ()
+checkAllStmts = checkStmtSequence
+
+checkStmtSequence :: [Stmt] -> L1Semantic ()
+checkStmtSequence [] = return ()
+checkStmtSequence (stmt:rest) = do
+    checkStmt stmt
+    if stmtDefinesAllVars stmt
+        then do
+            ns <- getNamespace
+            let allInitialized = Map.map makeInitialized ns
+            putNamespace allInitialized
+            checkStmtSequence rest
+        else checkStmtSequence rest
+  where
+    makeInitialized (Declared typ) = Initialized typ
+    makeInitialized (Initialized typ) = Initialized typ
+    
+    stmtDefinesAllVars (Ret _ _) = True
+    stmtDefinesAllVars (Break _) = True  
+    stmtDefinesAllVars (Continue _) = True
+    stmtDefinesAllVars _ = False
 
 varStatusAnalysis :: AST -> L1ExceptT SemanticContext
 varStatusAnalysis (Block stmts _) = do
@@ -69,7 +93,9 @@ withScope :: L1Semantic a -> L1Semantic a
 withScope action = do
     originalNamespace <- getNamespace
     result <- action
-    putNamespace originalNamespace
+    newNamespace <- getNamespace
+    let restoredNamespace = Map.intersectionWith (\_ newStatus -> newStatus) originalNamespace newNamespace
+    putNamespace restoredNamespace
     return result
 
 checkStmt :: Stmt -> L1Semantic ()
@@ -166,7 +192,9 @@ checkStmt (While cond body _) = do
     condType <- checkExprType cond
     unless (condType == BoolType) $
         semanticFail' "While condition must be a boolean expression"
+    savedNs <- getNamespace
     withLoop True $ checkStmt body
+    putNamespace savedNs
 
 checkStmt (For maybeInit maybeCond maybeStep body _) = do
     let needsScope = case maybeInit of
@@ -186,18 +214,15 @@ checkStmt (For maybeInit maybeCond maybeStep body _) = do
                       semanticFail' "For loop condition must be a boolean expression"
               Nothing -> return ()
 
-          withLoop True $ do
-              checkStmt body
+          withLoop True $ checkStmt body
               
-              case maybeStep of
-                  Just (Decl _ _ pos) ->
-                      semanticFail' $ "Declaration not allowed in for-loop step clause at: " ++ posPretty pos
-                  Just (Init _ _ _ pos) ->
-                      semanticFail' $ "Declaration not allowed in for-loop step clause at: " ++ posPretty pos
-                  Just stepStmt ->
-                      checkStmt stepStmt
-                  Nothing ->
-                      return ()
+          case maybeStep of
+              Just (Decl _ _ pos) ->
+                  semanticFail' $ "Declaration not allowed in for-loop step clause at: " ++ posPretty pos
+              Just (Init _ _ _ pos) ->
+                  semanticFail' $ "Declaration not allowed in for-loop step clause at: " ++ posPretty pos
+              Just stepStmt -> checkStmt stepStmt
+              Nothing -> return ()
     
     if needsScope
         then withScope checkForLoop
@@ -213,7 +238,7 @@ checkStmt (Continue pos) = do
     unless inLoopNow $
         semanticFail' $ "Continue statement outside of loop at: " ++ posPretty pos
 
-checkStmt (BlockStmt stmts _) = withScope $ mapM_ checkStmt stmts
+checkStmt (BlockStmt stmts _) = withScope $ checkStmtSequence stmts
 
 checkExprType :: Expr -> L1Semantic Type
 checkExprType (IntExpr str pos) = do
@@ -268,25 +293,19 @@ checkExprType (BinExpr op lhs rhs) = do
         Sub -> arithmeticOp lhsType rhsType  
         Div -> arithmeticOp lhsType rhsType
         Mod -> arithmeticOp lhsType rhsType
-        
         Lt -> comparisonOp lhsType rhsType
         Le -> comparisonOp lhsType rhsType
         Gt -> comparisonOp lhsType rhsType
         Ge -> comparisonOp lhsType rhsType
-        
         Eq -> equalityOp lhsType rhsType
         Ne -> equalityOp lhsType rhsType
-        
         And -> logicalOp lhsType rhsType
         Or -> logicalOp lhsType rhsType
-        
         BitAnd -> bitwiseOp lhsType rhsType
         BitOr -> bitwiseOp lhsType rhsType
         BitXor -> bitwiseOp lhsType rhsType
-        
         Shl -> shiftOp lhsType rhsType
         Shr -> shiftOp lhsType rhsType
-        
         _ -> semanticFail' $ "Unsupported binary operator: " ++ show op
   where
     arithmeticOp lType rType = do
@@ -323,12 +342,10 @@ checkExprType (TernaryExpr cond thenExpr elseExpr _) = do
     condType <- checkExprType cond
     unless (condType == BoolType) $
         semanticFail' "Ternary operator condition must be bool"
-    
     thenType <- checkExprType thenExpr
     elseType <- checkExprType elseExpr
     unless (thenType == elseType) $
         semanticFail' "Ternary operator branches must have the same type"
-    
     return thenType
 
 checkReturns :: AST -> L1Semantic ()
@@ -358,7 +375,6 @@ stmtReturns (Break _) = False
 stmtReturns (Continue _) = False
 stmtReturns (BlockStmt stmts _) = stmtsReturn stmts
 
-
 findAssignedVars :: Stmt -> [String]
 findAssignedVars (Asgn name Nothing _ _) = [name]
 findAssignedVars (Asgn name (Just _) _ _) = [name]
@@ -368,7 +384,6 @@ findAssignedVars (While _ body _) = findAssignedVars body
 findAssignedVars (For _ _ _ body _) = findAssignedVars body
 findAssignedVars (BlockStmt stmts _) = concatMap findAssignedVars stmts
 findAssignedVars _ = []
-
 
 checkStmtsUntilReturn :: [Stmt] -> L1Semantic ()
 checkStmtsUntilReturn [] = return ()
