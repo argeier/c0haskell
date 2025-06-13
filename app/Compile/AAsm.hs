@@ -105,51 +105,46 @@ genStmt (Decl _ name _) = do
     return False
 
 genStmt (Init _ name e _) = do
-    -- Be conservative about constant folding in Init statements
-    -- Only do constant folding if the expression contains no variable references
-    if containsVariableRef e
-    then do
-        r' <- genExpr e
-        assignVar name r'
-        clearConst name
-    else do
-        -- Safe to use constant folding - no variables involved
-        me <- constEval e
-        r <- freshReg
-        case me of
-            Just v -> do
-                emit $ regName r ++ " = " ++ show v
-                assignVar name r
-                bindConst name v
-            Nothing -> do
-                r' <- genExpr e
-                assignVar name r'
-                clearConst name
-    return False
+    destReg <- freshReg -- A new variable always gets a new register.
+    assignVar name destReg
 
+    -- If initializing from another variable, always treat it as a register move
+    -- to avoid using stale constant values from an outer scope.
+    case e of
+        Ident _ _ -> do
+            srcReg <- genExpr e
+            emit $ regName destReg ++ " = " ++ regName srcReg
+            clearConst name -- The new variable is not a constant.
+        _ -> do
+            -- For all other expressions (literals, etc.), use the existing logic.
+            me <- constEval e
+            case me of
+                Just v -> do
+                    emit $ regName destReg ++ " = " ++ show v
+                    bindConst name v
+                Nothing -> do
+                    srcReg <- genExpr e
+                    emit $ regName destReg ++ " = " ++ regName srcReg
+                    clearConst name
+    return False
 genStmt (Asgn name Nothing e _) = do
-    -- Check if the expression references the variable being assigned
-    -- If so, clear the constant first to avoid incorrect constant folding
-    if exprReferencesVar name e
-    then do
-        clearConst name  -- Clear before evaluation to prevent self-reference issues
-        varReg <- lookupVar name  -- Get current register for the variable
-        r' <- genExpr e
-        -- Emit assignment back to the variable's register to maintain consistency in loops
-        emit $ regName varReg ++ " = " ++ regName r'
-    else do
-        -- Safe to use constant folding
-        me <- constEval e
-        r <- freshReg
-        case me of
-            Just v -> do
-                emit $ regName r ++ " = " ++ show v
-                assignVar name r
-                bindConst name v
-            Nothing -> do
-                r' <- genExpr e
-                assignVar name r'
-                clearConst name
+    -- Evaluate the right-hand side expression first.
+    me <- constEval e
+    
+    -- Get the register for the variable we are assigning to.
+    destReg <- lookupVar name
+    
+    case me of
+        Just v -> do
+            emit $ regName destReg ++ " = " ++ show v
+            bindConst name v
+        Nothing -> do
+            -- Get the register for the evaluated expression.
+            srcReg <- genExpr e
+            -- Emit the MOV instruction.
+            emit $ regName destReg ++ " = " ++ regName srcReg
+            clearConst name
+            
     return False
 
 genStmt (Asgn name (Just op) e _) = do

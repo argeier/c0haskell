@@ -186,10 +186,18 @@ checkStmt (For maybeInit maybeCond maybeStep body _) = do
 
         -- Check step and body in loop context
         withLoop True $ do
-            case maybeStep of
-                Just stepStmt -> checkStmt stepStmt
-                Nothing -> return ()
             checkStmt body
+            
+            -- Add specific checks to forbid declarations in the step clause
+            case maybeStep of
+                Just (Decl _ _ pos) ->
+                    semanticFail' $ "Declaration not allowed in for-loop step clause at: " ++ posPretty pos
+                Just (Init _ _ _ pos) ->
+                    semanticFail' $ "Declaration not allowed in for-loop step clause at: " ++ posPretty pos
+                Just stepStmt ->
+                    checkStmt stepStmt -- Allow other valid statements (e.g., assignments)
+                Nothing ->
+                    return ()
 
 checkStmt (Break pos) = do
     inLoopNow <- isInLoop
