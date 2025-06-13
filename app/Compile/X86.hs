@@ -49,7 +49,7 @@ data RegState = RegState
     , freeRegs :: [String]
     , stackSlots :: Int
     , instructions :: [String]
-    , totalStackBytes :: Int  -- Track total allocated stack for proper cleanup
+    , totalStackBytes :: Int
     }
 
 type RegAlloc a = State RegState a
@@ -67,12 +67,10 @@ initialState =
 generateX86 :: [String] -> [String]
 generateX86 aasm = [".intel_syntax noprefix"] ++ prologue ++ body ++ epilogue
   where
-    -- First pass: calculate stack requirements
     tempState = execState (processAAsmInstructions aasm) initialState
     stackRequiredBytes = stackSlots tempState * 8
     alignedStackBytes = if stackRequiredBytes > 0 then ((stackRequiredBytes + 15) `div` 16) * 16 else 0
     
-    -- Second pass: process with known stack size
     finalState = execState (processAAsmInstructions aasm) (initialState { totalStackBytes = alignedStackBytes })
     
     body = reverse $ instructions finalState
@@ -92,7 +90,6 @@ generateX86 aasm = [".intel_syntax noprefix"] ++ prologue ++ body ++ epilogue
             ++ ([printf "\tsub rsp, %d" alignedStackBytes | alignedStackBytes > 0])
 
     epilogue = 
-        -- Only generate epilogue if there are instructions that don't end with ret
         if not (endsWithRet body) then
             ([printf "\tadd rsp, %d" alignedStackBytes | alignedStackBytes > 0])
                 ++ [ "\tpop rbp"
@@ -101,7 +98,7 @@ generateX86 aasm = [".intel_syntax noprefix"] ++ prologue ++ body ++ epilogue
         else []
     
     endsWithRet [] = False  
-    endsWithRet (x:_) = "\tret" `isPrefixOf` x  -- Check first instruction (remember body is reversed)
+    endsWithRet (x:_) = "\tret" `isPrefixOf` x
 
 emit :: String -> RegAlloc ()
 emit instr = modify $ \s -> s{instructions = instr : instructions s}
@@ -135,42 +132,34 @@ processAAsmInstructions = mapM_ processAAsmInstruction
 
 processAAsmInstruction :: String -> RegAlloc ()
 processAAsmInstruction instr
-    -- Handle labels (e.g., "label_name:")
     | ":" `isSuffixOf` instr = do
-        emit $ instr  -- Just emit the label as-is
+        emit $ instr
     
-    -- Handle unconditional jumps (e.g., "goto label_name")
     | "goto " `isPrefixOf` instr = do
         let label = trim $ drop 5 instr
         emit $ "\tjmp " ++ label
     
-    -- Handle conditional jumps (e.g., "if %1 == 0 goto label_name")
     | "if " `isPrefixOf` instr = do
         let rest = trim $ drop 3 instr
         case parseCondJump rest of
             Just (tempReg, label) -> do
                 regOp <- getOperand tempReg
-                -- Compare register content with 0 and jump if equal
                 emit' "cmp" [regOp, Imm "0"]
                 emit $ "\tje " ++ label
             Nothing -> error $ "Cannot parse conditional jump: " ++ instr
     
-    -- Handle return statements
     | "ret " `isPrefixOf` instr = do
         let tempSrcStr = trim $ drop 4 instr
         srcOp <- getOperand tempSrcStr
         emitMove (Reg "rax") srcOp
-        -- Actually return! Restore stack properly
         st <- get
         let stackBytes = totalStackBytes st
-        -- Restore stack space if any was allocated
         when (stackBytes > 0) $ emit $ printf "\tadd rsp, %d" stackBytes
         emit "\tpop rbp"
         emit "\tret"
     
-    -- Handle regular assignments and operations
     | otherwise = case words instr of
-        [destTempStr, "=", valStr] | all isDigit valStr || (not (null valStr) && head valStr == '-' && all isDigit (tail valStr)) -> do
+        [destTempStr, "=", valStr] | all isDigit valStr || isNegativeInteger valStr -> do
             destOp <- getOperand destTempStr
             if valStr == "-2147483648"
                 then emitMove destOp (Imm "0x80000000")
@@ -195,15 +184,17 @@ processAAsmInstruction instr
             processBinOp destAsSrc1Op destAsSrc1Op opStr src2Op
         _ -> error $ "Cannot parse AAsm instruction: " ++ instr
 
--- Parse conditional jump format: "%reg == 0 goto label"
 parseCondJump :: String -> Maybe (String, String)
 parseCondJump s = case words s of
     [reg, "==", "0", "goto", label] -> Just (reg, label)
     _ -> Nothing
 
--- List of unary operators
 unaryOps :: [String]
 unaryOps = ["-", "!", "~"]
+
+isNegativeInteger :: String -> Bool
+isNegativeInteger ('-':rest) = not (null rest) && all isDigit rest
+isNegativeInteger _ = False
 
 processUnaryOp :: Operand -> String -> Operand -> RegAlloc ()
 processUnaryOp destOp opStr srcOp = do
@@ -212,11 +203,10 @@ processUnaryOp destOp opStr srcOp = do
             emitMove destOp srcOp
             emitUnaryOp "neg" destOp
         "!" -> do
-            -- Logical NOT: convert non-zero to 0, zero to 1
             emitMove destOp srcOp
             emit' "cmp" [destOp, Imm "0"]
-            emit "\tsete al"  -- Set AL to 1 if zero, 0 otherwise
-            emit "\tmovzx eax, al"  -- Zero-extend AL to EAX
+            emit "\tsete al"
+            emit "\tmovzx eax, al"
             emitMove destOp (Reg "rax")
         "~" -> do
             emitMove destOp srcOp
@@ -231,26 +221,21 @@ processBinOp destOp src1Op opStr actualSrc2Op =
         "*" -> emitBinaryFinal "imul" destOp src1Op actualSrc2Op
         "/" -> emitDivMod "div" destOp src1Op actualSrc2Op
         "%" -> emitDivMod "mod" destOp src1Op actualSrc2Op
-        -- Comparison operators
         "<" -> emitComparison "setl" destOp src1Op actualSrc2Op
         "<=" -> emitComparison "setle" destOp src1Op actualSrc2Op
         ">" -> emitComparison "setg" destOp src1Op actualSrc2Op
         ">=" -> emitComparison "setge" destOp src1Op actualSrc2Op
         "==" -> emitComparison "sete" destOp src1Op actualSrc2Op
         "!=" -> emitComparison "setne" destOp src1Op actualSrc2Op
-        -- Logical operators (short-circuit evaluation already handled in AAsm)
         "&&" -> emitLogicalAnd destOp src1Op actualSrc2Op
         "||" -> emitLogicalOr destOp src1Op actualSrc2Op
-        -- Bitwise operators
         "&" -> emitBinaryFinal "and" destOp src1Op actualSrc2Op
         "^" -> emitBinaryFinal "xor" destOp src1Op actualSrc2Op
         "|" -> emitBinaryFinal "or" destOp src1Op actualSrc2Op
-        -- Shift operators
         "<<" -> emitShift "sal" destOp src1Op actualSrc2Op
         ">>" -> emitShift "sar" destOp src1Op actualSrc2Op
         _ -> error $ "Unsupported binary AAsm operator: " ++ opStr
 
--- Handle division and modulo
 emitDivMod :: String -> Operand -> Operand -> Operand -> RegAlloc ()
 emitDivMod op destOp src1Op src2Op = do
     emit "\tpush rdx"
@@ -271,16 +256,14 @@ emitDivMod op destOp src1Op src2Op = do
     emit' "idiv" [divisorOp]
     
     case op of
-        "div" -> emitMove destOp (Reg "rax")  -- Quotient in RAX
-        "mod" -> emitMove destOp (Reg "rdx")  -- Remainder in RDX
+        "div" -> emitMove destOp (Reg "rax")
+        "mod" -> emitMove destOp (Reg "rdx")
         _ -> error $ "Unknown div/mod operation: " ++ op
     
     emit "\tpop rdx"
 
--- Handle comparison operations
 emitComparison :: String -> Operand -> Operand -> Operand -> RegAlloc ()
 emitComparison setInstr destOp src1Op src2Op = do
-    -- Always use a temporary register for the comparison to avoid conflicts
     let tempReg = Reg "rax"
     
     emitMove tempReg src1Op
@@ -289,39 +272,33 @@ emitComparison setInstr destOp src1Op src2Op = do
         Mem _ -> emit' "cmp" [tempReg, src2Op]  
         Imm _ -> emit' "cmp" [tempReg, src2Op]
     
-    -- Set AL based on comparison, then zero-extend to full register
     emit $ "\t" ++ setInstr ++ " al"
     emit "\tmovzx eax, al"
     
-    -- Move result to destination
     emitMove destOp (Reg "rax")
 
--- Handle logical AND (both operands already evaluated)
 emitLogicalAnd :: Operand -> Operand -> Operand -> RegAlloc ()
 emitLogicalAnd destOp src1Op src2Op = do
     let calcReg = case destOp of
             Reg _ -> destOp  
             _ -> Reg "rax"
     
-    -- Convert operands to 0/1 then multiply
     emitMove calcReg src1Op
     emit' "cmp" [calcReg, Imm "0"]
     emit "\tsetne al"
     emit "\tmovzx eax, al"
     emitMove calcReg (Reg "rax")
     
-    -- Choose temp register that doesn't conflict with inputs
     let tempReg = case (src1Op, src2Op) of
-            (Reg "rcx", _) -> Reg "rdx"  -- If src1 uses rcx, use rdx
-            (_, Reg "rcx") -> Reg "rdx"  -- If src2 uses rcx, use rdx
-            (Reg "rdx", _) -> Reg "rcx"  -- If src1 uses rdx, use rcx
-            (_, Reg "rdx") -> Reg "rcx"  -- If src2 uses rdx, use rcx
-            _ -> Reg "rcx"               -- Default to rcx
+            (Reg "rcx", _) -> Reg "rdx"
+            (_, Reg "rcx") -> Reg "rdx"
+            (Reg "rdx", _) -> Reg "rcx"
+            (_, Reg "rdx") -> Reg "rcx"
+            _ -> Reg "rcx"
     
     emitMove tempReg src2Op
     emit' "cmp" [tempReg, Imm "0"]
     
-    -- Use appropriate 8-bit register based on temp register choice
     case tempReg of
         Reg "rcx" -> do
             emit "\tsetne cl"
@@ -337,17 +314,14 @@ emitLogicalAnd destOp src1Op src2Op = do
         Mem _ -> emitMove destOp calcReg
         _ -> return ()
 
--- Handle logical OR (both operands already evaluated)
 emitLogicalOr :: Operand -> Operand -> Operand -> RegAlloc ()
 emitLogicalOr destOp src1Op src2Op = do
     let calcReg = case destOp of
             Reg _ -> destOp
             _ -> Reg "rax"
     
-    -- OR the operands, then convert result to 0/1
     emitMove calcReg src1Op
     
-    -- Choose temp register that doesn't conflict
     let tempReg = case (src1Op, src2Op, calcReg) of
             (Reg "rcx", _, _) -> Reg "rdx"
             (_, Reg "rcx", _) -> Reg "rdx"  
@@ -369,7 +343,6 @@ emitLogicalOr destOp src1Op src2Op = do
         Mem _ -> emitMove destOp calcReg
         _ -> return ()
 
--- Handle shift operations
 emitShift :: String -> Operand -> Operand -> Operand -> RegAlloc ()
 emitShift shiftInstr destOp src1Op src2Op = do
     let calcReg = case destOp of
@@ -378,13 +351,12 @@ emitShift shiftInstr destOp src1Op src2Op = do
     
     emitMove calcReg src1Op
     
-    -- Shift amount must be in CL register or immediate
     case src2Op of
         Imm i -> emit' shiftInstr [calcReg, Imm i]
         _ -> do
             emit "\tpush rcx"
             emitMove (Reg "rcx") src2Op
-            emit' shiftInstr [calcReg, Reg "cl"]  -- Use CL (low 8 bits of RCX)
+            emit' shiftInstr [calcReg, Reg "cl"]
             emit "\tpop rcx"
     
     case destOp of

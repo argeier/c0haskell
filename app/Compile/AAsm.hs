@@ -21,9 +21,9 @@ data CodeGenState = CodeGenState
     { regMap :: AAsmAlloc
     , constMap :: ConstEnv
     , nextReg :: Register
-    , nextLabel :: Integer  -- For generating unique labels
-    , breakLabels :: [Label]  -- Stack of break labels for nested loops
-    , continueLabels :: [Label]  -- Stack of continue labels for nested loops
+    , nextLabel :: Integer
+    , breakLabels :: [Label]
+    , continueLabels :: [Label]
     , code :: [String]
     }
 
@@ -43,7 +43,6 @@ freshReg = do
     put s{nextReg = r + 1}
     return r
 
--- Generate a fresh label
 freshLabel :: String -> CodeGen Label
 freshLabel prefix = do
     s <- get
@@ -73,14 +72,12 @@ lookupVar name = do
 emit :: String -> CodeGen ()
 emit instr = modify $ \s -> s{code = code s ++ [instr]}
 
--- Push break/continue labels for loops
 pushLoopLabels :: Label -> Label -> CodeGen ()
 pushLoopLabels breakLbl continueLbl = modify $ \s ->
     s { breakLabels = breakLbl : breakLabels s
       , continueLabels = continueLbl : continueLabels s
       }
 
--- Pop break/continue labels
 popLoopLabels :: CodeGen ()
 popLoopLabels = modify $ \s ->
     s { breakLabels = case breakLabels s of
@@ -105,18 +102,15 @@ genStmt (Decl _ name _) = do
     return False
 
 genStmt (Init _ name e _) = do
-    destReg <- freshReg -- A new variable always gets a new register.
+    destReg <- freshReg
     assignVar name destReg
 
-    -- If initializing from another variable, always treat it as a register move
-    -- to avoid using stale constant values from an outer scope.
     case e of
         Ident _ _ -> do
             srcReg <- genExpr e
             emit $ regName destReg ++ " = " ++ regName srcReg
-            clearConst name -- The new variable is not a constant.
+            clearConst name
         _ -> do
-            -- For all other expressions (literals, etc.), use the existing logic.
             me <- constEval e
             case me of
                 Just v -> do
@@ -127,11 +121,9 @@ genStmt (Init _ name e _) = do
                     emit $ regName destReg ++ " = " ++ regName srcReg
                     clearConst name
     return False
+
 genStmt (Asgn name Nothing e _) = do
-    -- Evaluate the right-hand side expression first.
     me <- constEval e
-    
-    -- Get the register for the variable we are assigning to.
     destReg <- lookupVar name
     
     case me of
@@ -139,9 +131,7 @@ genStmt (Asgn name Nothing e _) = do
             emit $ regName destReg ++ " = " ++ show v
             bindConst name v
         Nothing -> do
-            -- Get the register for the evaluated expression.
             srcReg <- genExpr e
-            -- Emit the MOV instruction.
             emit $ regName destReg ++ " = " ++ regName srcReg
             clearConst name
             
@@ -159,28 +149,22 @@ genStmt (Ret e _) = do
     emit ("ret " ++ regName r)
     return True
 
--- New L2 control flow statements
 genStmt (If cond thenStmt elseStmt _) = do
     condReg <- genExpr cond
     elseLbl <- freshLabel "else_"
     endLbl <- freshLabel "end_if_"
     
-    -- Jump to else if condition is false (0)
     emit $ "if " ++ regName condReg ++ " == 0 goto " ++ elseLbl
     
-    -- Generate then branch
     thenReturns <- genStmt thenStmt
     
-    -- Only jump to end if the then branch didn't return
     unless thenReturns $ emit $ "goto " ++ endLbl
     
-    -- Else branch
     emit $ elseLbl ++ ":"
     elseReturns <- case elseStmt of
         Just stmt -> genStmt stmt
         Nothing -> return False
     
-    -- Only emit end label if at least one branch doesn't return
     unless (thenReturns && elseReturns) $ emit $ endLbl ++ ":"
     
     return (thenReturns && elseReturns)
@@ -189,7 +173,7 @@ genStmt (While cond body _) = do
     startLbl <- freshLabel "while_start_"
     endLbl <- freshLabel "while_end_"
     
-    pushLoopLabels endLbl startLbl  -- break goes to end, continue goes to start
+    pushLoopLabels endLbl startLbl
     
     emit $ startLbl ++ ":"
     condReg <- genExpr cond
@@ -207,26 +191,22 @@ genStmt (For maybeInit maybeCond maybeStep body _) = do
     stepLbl <- freshLabel "for_step_"
     endLbl <- freshLabel "for_end_"
     
-    -- Generate init
     case maybeInit of
         Just initStmt -> do _ <- genStmt initStmt; return ()
         Nothing -> return ()
     
-    pushLoopLabels endLbl stepLbl  -- break goes to end, continue goes to step
+    pushLoopLabels endLbl stepLbl
     
     emit $ startLbl ++ ":"
     
-    -- Generate condition check
     case maybeCond of
         Just condExpr -> do
             condReg <- genExpr condExpr
             emit $ "if " ++ regName condReg ++ " == 0 goto " ++ endLbl
-        Nothing -> return ()  -- Infinite loop if no condition
+        Nothing -> return ()
     
-    -- Generate body
     _ <- genStmt body
     
-    -- Step label and step statement
     emit $ stepLbl ++ ":"
     case maybeStep of
         Just stepStmt -> do _ <- genStmt stepStmt; return ()
@@ -261,7 +241,6 @@ toInt32 x =
     let w = x .&. 0xffffffff
      in if w >= 0x80000000 then w - 0x100000000 else w
 
--- Extended constant evaluation for L2
 constEval :: Expr -> CodeGen (Maybe Integer)
 constEval (IntExpr s _) =
     case parseNumber s of
@@ -303,27 +282,22 @@ constEval (BinExpr op l r) = do
                     if v2 == 0
                         then Nothing
                         else Just $ toInt32 (v1 `rem` v2)
-                -- Comparison operators
                 Lt -> Just $ if v1 < v2 then 1 else 0
                 Le -> Just $ if v1 <= v2 then 1 else 0
                 Gt -> Just $ if v1 > v2 then 1 else 0
                 Ge -> Just $ if v1 >= v2 then 1 else 0
                 Eq -> Just $ if v1 == v2 then 1 else 0
                 Ne -> Just $ if v1 /= v2 then 1 else 0
-                -- Logical operators
                 And -> Just $ if v1 /= 0 && v2 /= 0 then 1 else 0
                 Or -> Just $ if v1 /= 0 || v2 /= 0 then 1 else 0
-                -- Bitwise operators
                 BitAnd -> Just $ toInt32 (v1 .&. v2)
                 BitOr -> Just $ toInt32 (v1 .|. v2)
                 BitXor -> Just $ toInt32 (v1 `xor` v2)
-                -- Shift operators (mask to 5 bits as per spec)
                 Shl -> Just $ toInt32 (v1 `shiftL` fromIntegral (v2 .&. 0x1f))
                 Shr -> Just $ toInt32 (v1 `shiftR` fromIntegral (v2 .&. 0x1f))
                 _ -> Nothing
         _ -> Nothing
 
--- Simple ternary constant evaluation
 constEval (TernaryExpr cond thenExpr elseExpr _) = do
     mc <- constEval cond
     case mc of
@@ -357,7 +331,6 @@ genExpr (UnExpr op e) = do
 genExpr (BinExpr op e1 e2) = case op of
     And -> genAnd e1 e2
     Or  -> genOr e1 e2
-    -- All other operators use the old, non-short-circuiting logic
     _   -> do
         r1 <- genExpr e1
         r2 <- genExpr e2
@@ -365,7 +338,6 @@ genExpr (BinExpr op e1 e2) = case op of
         emit $ regName r ++ " = " ++ regName r1 ++ " " ++ show op ++ " " ++ regName r2
         return r
 
--- Generate code for ternary operator
 genExpr (TernaryExpr cond thenExpr elseExpr _) = do
     condReg <- genExpr cond
     thenLbl <- freshLabel "ternary_then_"
@@ -373,16 +345,13 @@ genExpr (TernaryExpr cond thenExpr elseExpr _) = do
     endLbl <- freshLabel "ternary_end_"
     resultReg <- freshReg
     
-    -- Jump to else if condition is false
     emit $ "if " ++ regName condReg ++ " == 0 goto " ++ elseLbl
     
-    -- Then branch
     emit $ thenLbl ++ ":"
     thenReg <- genExpr thenExpr
     emit $ regName resultReg ++ " = " ++ regName thenReg
     emit $ "goto " ++ endLbl
     
-    -- Else branch
     emit $ elseLbl ++ ":"
     elseReg <- genExpr elseExpr
     emit $ regName resultReg ++ " = " ++ regName elseReg
@@ -396,17 +365,12 @@ genAnd e1 e2 = do
     falseLbl <- freshLabel "and_false_"
     endLbl <- freshLabel "and_end_"
 
-    -- Evaluate LHS
     r1 <- genExpr e1
-    -- If LHS is false (0), the whole expression is false. Skip RHS.
     emit $ "if " ++ regName r1 ++ " == 0 goto " ++ falseLbl
 
-    -- LHS was true, so evaluate RHS
     r2 <- genExpr e2
-    -- If RHS is false (0), the whole expression is false.
     emit $ "if " ++ regName r2 ++ " == 0 goto " ++ falseLbl
 
-    -- Both LHS and RHS were true
     emit $ regName resultReg ++ " = 1"
     emit $ "goto " ++ endLbl
 
@@ -423,16 +387,12 @@ genOr e1 e2 = do
     trueLbl <- freshLabel "or_true_"
     endLbl <- freshLabel "or_end_"
 
-    -- Evaluate LHS
     r1 <- genExpr e1
-    -- If LHS is true (non-zero), the whole expression is true. Skip RHS.
     emit $ "if " ++ regName r1 ++ " == 0 goto " ++ checkRhsLbl
     emit $ "goto " ++ trueLbl
 
-    -- LHS was false, so evaluate RHS
     emit $ checkRhsLbl ++ ":"
     r2 <- genExpr e2
-    -- If RHS is true (non-zero), the whole expression is true.
     emit $ "if " ++ regName r2 ++ " == 0 goto both_false"
     emit $ "goto " ++ trueLbl
 

@@ -57,12 +57,10 @@ parseNumber s = do
 
 type Parser = Parsec Void String
 
--- Custom whitespace parser that only accepts specific whitespace characters
 whitespaceChar :: Parser Char
 whitespaceChar =
     choice
-        [ -- Only allow space, tab, newline, carriage return
-          char ' '
+        [ char ' '
         , char '\t'
         , char '\n'
         , char '\r'
@@ -75,7 +73,6 @@ whitespace = void $ some whitespaceChar
 astParser :: Parser AST
 astParser = do
     sc
-    -- this parses `int main()` literally, like in the L1 grammar
     reserved "int"
     reserved "main"
     parens $ pure ()
@@ -83,11 +80,10 @@ astParser = do
         pos <- getSourcePos
         stmts <- many (stmt <?> "statement in main block")
         return $ Block stmts pos
-    sc -- Consume trailing whitespace
+    sc
     eof
     return mainBlock
 
--- Parse type for L2
 parseType :: Parser Type
 parseType = choice
     [ IntType <$ reserved "int"
@@ -96,13 +92,13 @@ parseType = choice
 
 stmt :: Parser Stmt
 stmt = choice
-    [ try forStmt          -- Try for first, explicitly
-    , try ifStmt           -- Then other control statements
+    [ try forStmt
+    , try ifStmt
     , try whileStmt
     , try breakStmt
     , try continueStmt
-    , try blockStmt        -- Block statements { ... }
-    , semicolonStmt        -- Statements that end with semicolon
+    , try blockStmt
+    , semicolonStmt
     ] <?> "statement"
   where
     semicolonStmt = do
@@ -110,7 +106,6 @@ stmt = choice
         semi
         return s
 
--- New: Block statement
 blockStmt :: Parser Stmt
 blockStmt = do
     pos <- getSourcePos
@@ -191,7 +186,6 @@ simp = do
     e <- expr
     return $ Asgn name op e pos
 
--- Extended assignment operators for L2
 asnOp :: Parser (Maybe Op)
 asnOp =
     do
@@ -218,11 +212,10 @@ ret = do
     e <- expr
     return $ Ret e pos
 
--- Base expressions
 expr' :: Parser Expr
 expr' = choice
     [ parens expr
-    , boolExpr     -- New: boolean literals
+    , boolExpr
     , intExpr
     , identExpr
     ]
@@ -233,7 +226,6 @@ intExpr = do
     str <- numberLiteral
     return $ IntExpr str pos
 
--- New: Boolean expressions
 boolExpr :: Parser Expr
 boolExpr = do
     pos <- getSourcePos
@@ -249,37 +241,34 @@ identExpr = do
     name <- identifier
     return $ Ident name pos
 
--- Updated operator precedence table for L2
 opTable :: [[Operator Parser Expr]]
 opTable =
-    [ [Prefix manyUnaryOp]  -- Unary operators: ! ~ -
-    , [ InfixL (BinExpr Mul <$ symbol "*")  -- * / %
+    [ [Prefix manyUnaryOp]
+    , [ InfixL (BinExpr Mul <$ symbol "*")
       , InfixL (BinExpr Div <$ symbol "/")
       , InfixL (BinExpr Mod <$ symbol "%")
       ]
-    , [ InfixL (BinExpr Add <$ symbol "+")  -- + -
+    , [ InfixL (BinExpr Add <$ symbol "+")
       , InfixL (BinExpr Sub <$ symbol "-")
       ]
-    , [ InfixL (BinExpr Shl <$ try (symbol "<<"))  -- << >>
+    , [ InfixL (BinExpr Shl <$ try (symbol "<<"))
       , InfixL (BinExpr Shr <$ try (symbol ">>"))
       ]
-    , [ InfixL (BinExpr Le <$ try (symbol "<="))  -- <= must come before <
-      , InfixL (BinExpr Ge <$ try (symbol ">="))  -- >= must come before >
-      , InfixL (BinExpr Lt <$ symbol "<")         -- < 
-      , InfixL (BinExpr Gt <$ symbol ">")         -- >
+    , [ InfixL (BinExpr Le <$ try (symbol "<="))
+      , InfixL (BinExpr Ge <$ try (symbol ">="))
+      , InfixL (BinExpr Lt <$ symbol "<")
+      , InfixL (BinExpr Gt <$ symbol ">")
       ]
-    , [ InfixL (BinExpr Eq <$ try (symbol "=="))  -- == !=
+    , [ InfixL (BinExpr Eq <$ try (symbol "=="))
       , InfixL (BinExpr Ne <$ try (symbol "!="))
       ]
-    , [InfixL (BinExpr BitAnd <$ try (symbol "&" <* notFollowedBy (char '&')))]  -- & (not &&)
-    , [InfixL (BinExpr BitXor <$ symbol "^")]  -- ^
-    , [InfixL (BinExpr BitOr <$ try (symbol "|" <* notFollowedBy (char '|')))]   -- | (not ||)
-    , [InfixL (BinExpr And <$ try (symbol "&&"))]    -- &&
-    , [InfixL (BinExpr Or <$ try (symbol "||"))]     -- ||
+    , [InfixL (BinExpr BitAnd <$ try (symbol "&" <* notFollowedBy (char '&')))]
+    , [InfixL (BinExpr BitXor <$ symbol "^")]
+    , [InfixL (BinExpr BitOr <$ try (symbol "|" <* notFollowedBy (char '|')))]
+    , [InfixL (BinExpr And <$ try (symbol "&&"))]
+    , [InfixL (BinExpr Or <$ try (symbol "||"))]
     ]
   where
-    -- this allows us to parse `---x` as `-(-(-x))`
-    -- makeExprParser doesn't do this by default
     manyUnaryOp = foldr1 (.) <$> some unaryOpChoice
     unaryOpChoice = choice 
         [ UnExpr Neg <$ symbol "-"
@@ -290,7 +279,6 @@ opTable =
 expr :: Parser Expr
 expr = ternaryExpr <?> "expression"
 
--- Handle ternary operator separately since makeExprParser doesn't support it well
 ternaryExpr :: Parser Expr
 ternaryExpr = do
     e1 <- makeExprParser expr' opTable
@@ -305,7 +293,6 @@ ternaryExpr = do
         Nothing -> return e1
         Just ternary -> return ternary
 
--- Lexer starts here, probably worth moving to its own file at some point
 sc :: Parser ()
 sc = L.space whitespace lineComment blockComment
   where
@@ -330,7 +317,6 @@ semi = void $ symbol ";"
 numberLiteral :: Parser String
 numberLiteral = lexeme (try hexLiteral <|> decLiteral <?> "number")
 
--- We want to reject leading zeroes, but `0` itself should of course be accepted
 decLiteral :: Parser String
 decLiteral = string "0" <|> (:) <$> oneOf ['1' .. '9'] <*> many digitChar
 
@@ -369,20 +355,19 @@ hexadecimal = do
 reserved :: String -> Parser ()
 reserved w = void $ lexeme (string w <* notFollowedBy identLetter)
 
--- Updated reserved words for L2
 reservedWords :: [String]
 reservedWords =
     [ "alloc"
     , "alloc_array"
     , "assert"
-    , "bool"      -- New for L2
-    , "break"     -- New for L2
+    , "bool"
+    , "break"
     , "char"
-    , "continue"  -- New for L2
-    , "else"      -- New for L2
-    , "false"     -- New for L2
-    , "for"       -- New for L2 ← Make sure this is here
-    , "if"        -- New for L2
+    , "continue"
+    , "else"
+    , "false"
+    , "for"
+    , "if"
     , "int"
     , "NULL"
     , "print"
@@ -390,12 +375,11 @@ reservedWords =
     , "return"
     , "string"
     , "struct"
-    , "true"      -- New for L2
+    , "true"
     , "void"
-    , "while"     -- New for L2
+    , "while"
     ]
 
--- Operations - extended for L2
 opStart :: Parser Char
 opStart = oneOf "=+-*/%&^|<>!~"
 
@@ -405,14 +389,12 @@ opLetter = oneOf "=&|<>"
 operator :: Parser String
 operator = lexeme ((:) <$> opStart <*> many opLetter)
 
--- ASCII-only character parsers
 asciiLetterChar :: Parser Char
 asciiLetterChar = satisfy (\c -> isAscii c && isAlpha c) <?> "ASCII letter"
 
 asciiAlphaNumChar :: Parser Char
 asciiAlphaNumChar = satisfy (\c -> isAscii c && isAlphaNum c) <?> "ASCII letter or digit"
 
--- Identifiers
 identStart :: Parser Char
 identStart = asciiLetterChar <|> char '_'
 

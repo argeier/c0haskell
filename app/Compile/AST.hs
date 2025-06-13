@@ -11,7 +11,6 @@ module Compile.AST (
 import Data.List (intercalate)
 import Text.Megaparsec (SourcePos, sourcePosPretty)
 
--- Add Type for L2
 data Type
     = IntType
     | BoolType
@@ -20,50 +19,39 @@ data Type
 data AST
     = Block [Stmt] SourcePos
 
--- Extended statements for L2
 data Stmt
-    = Decl Type String SourcePos  -- Modified to include type
-    | Init Type String Expr SourcePos  -- Modified to include type
+    = Decl Type String SourcePos
+    | Init Type String Expr SourcePos
     | Asgn String AsgnOp Expr SourcePos
     | Ret Expr SourcePos
-    -- New L2 control flow statements
-    | If Expr Stmt (Maybe Stmt) SourcePos  -- if condition then else
+    | If Expr Stmt (Maybe Stmt) SourcePos
     | While Expr Stmt SourcePos
-    | For (Maybe Stmt) (Maybe Expr) (Maybe Stmt) Stmt SourcePos  -- init, condition, step, body
+    | For (Maybe Stmt) (Maybe Expr) (Maybe Stmt) Stmt SourcePos
     | Break SourcePos
     | Continue SourcePos
-    | BlockStmt [Stmt] SourcePos  -- Block as statement
+    | BlockStmt [Stmt] SourcePos
 
--- Extended expressions for L2
 data Expr
     = IntExpr String SourcePos
-    | BoolExpr Bool SourcePos  -- New: boolean literals
+    | BoolExpr Bool SourcePos
     | Ident String SourcePos
     | UnExpr Op Expr
     | BinExpr Op Expr Expr
-    | TernaryExpr Expr Expr Expr SourcePos  -- New: ternary operator
+    | TernaryExpr Expr Expr Expr SourcePos
 
--- Nothing means =, Just is for +=, %=, ...
 type AsgnOp = Maybe Op
 
--- Extended operators for L2
 data Op
     = Mul | Add | Sub | Div | Neg | Mod | Nop
-    -- Comparison operators
     | Lt | Le | Gt | Ge | Eq | Ne
-    -- Logical operators
     | And | Or | Not
-    -- Bitwise operators
     | BitAnd | BitOr | BitXor | BitNot
-    -- Shift operators
     | Shl | Shr
     deriving (Eq)
 
--- re-exported for convenience
 posPretty :: SourcePos -> String
 posPretty = sourcePosPretty
 
--- Some very basic pretty printing
 instance Show AST where
     show (Block stmts _) =
         "Block: {\n" ++ intercalate "\n" (map show stmts) ++ "\n}"
@@ -105,23 +93,19 @@ instance Show Op where
     show Neg = "-"
     show Mod = "%"
     show Nop = "[nop]"
-    -- Comparison
     show Lt = "<"
     show Le = "<="
     show Gt = ">"
     show Ge = ">="
     show Eq = "=="
     show Ne = "!="
-    -- Logical
     show And = "&&"
     show Or = "||"
     show Not = "!"
-    -- Bitwise
     show BitAnd = "&"
     show BitOr = "|"
     show BitXor = "^"
     show BitNot = "~"
-    -- Shift
     show Shl = "<<"
     show Shr = ">>"
 

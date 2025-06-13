@@ -19,22 +19,19 @@ import Control.Monad (unless, when)
 import qualified Data.Map as Map
 
 data VariableStatus
-    = Declared Type  -- Now includes type information
+    = Declared Type
     | Initialized Type
     deriving (Show, Eq)
 
--- You might want to keep track of some location information as well at some point
 type Namespace = Map.Map String VariableStatus
 
--- Context for tracking loops and returns
 data SemanticContext = SemanticContext
     { variables :: Namespace
-    , inLoop :: Bool  -- Track if we're inside a loop (for break/continue)
+    , inLoop :: Bool
     } deriving (Show)
 
 type L1Semantic = StateT SemanticContext L1ExceptT
 
--- A little wrapper so we don't have to ($ lift) everywhere inside the StateT
 semanticFail' :: String -> L1Semantic a
 semanticFail' = lift . semanticFail
 
@@ -43,34 +40,29 @@ semanticAnalysis ast = do
     ctx <- varStatusAnalysis ast
     evalStateT (checkReturns ast) ctx
 
--- right now an AST is just a list of statements
 varStatusAnalysis :: AST -> L1ExceptT SemanticContext
 varStatusAnalysis (Block stmts _) = do
     finalCtx <- execStateT (mapM_ checkStmt stmts) (SemanticContext Map.empty False)
     return finalCtx
 
--- Get current namespace
 getNamespace :: L1Semantic Namespace
 getNamespace = variables <$> get
 
--- Update namespace
 putNamespace :: Namespace -> L1Semantic ()
 putNamespace ns = do
     ctx <- get
     put ctx { variables = ns }
 
--- Check if we're in a loop
 isInLoop :: L1Semantic Bool
 isInLoop = inLoop <$> get
 
--- Set loop context
 withLoop :: Bool -> L1Semantic a -> L1Semantic a
 withLoop loopStatus action = do
     ctx <- get
     put ctx { inLoop = loopStatus }
     result <- action
     ctx' <- get
-    put ctx' { inLoop = inLoop ctx }  -- Restore original loop status
+    put ctx' { inLoop = inLoop ctx }
     return result
     
 withScope :: L1Semantic a -> L1Semantic a
@@ -80,7 +72,6 @@ withScope action = do
     putNamespace originalNamespace
     return result
 
--- Extended statement checking for L2
 checkStmt :: Stmt -> L1Semantic ()
 checkStmt (Decl typ name pos) = do
     ns <- getNamespace
@@ -96,7 +87,6 @@ checkStmt (Init typ name e pos) = do
     when isDeclared $
         semanticFail' $
             "Variable " ++ name ++ " redeclared (initialized) at: " ++ posPretty pos
-    -- Type check the expression
     exprType <- checkExprType e
     unless (typ == exprType) $
         semanticFail' $
@@ -108,8 +98,6 @@ checkStmt (Asgn name op e pos) = do
     ns <- getNamespace
     case op of
         Nothing -> do
-            -- Assignment with `=`
-            -- If we assign to a variable with `=`, it has to be either declared or initialized
             case Map.lookup name ns of
                 Nothing ->
                     semanticFail' $
@@ -131,12 +119,9 @@ checkStmt (Asgn name op e pos) = do
                             "Type mismatch in assignment to " ++ name ++ " at: " ++ posPretty pos
                                 ++ ". Expected " ++ show varType ++ " but got " ++ show exprType
         Just _ ->
-            -- Assinging with op, e.g. `x += 3`,
-            -- for this x needs to be initialized, not just declared
             case Map.lookup name ns of
                 Just (Initialized varType) -> do
                     exprType <- checkExprType e
-                    -- For compound assignment, both operands should have compatible types
                     unless (varType == exprType && varType == IntType) $
                         semanticFail' $
                             "Type mismatch in compound assignment to " ++ name ++ " at: " ++ posPretty pos
@@ -153,7 +138,6 @@ checkStmt (Ret e _) = do
     unless (exprType == IntType) $
         semanticFail' "Return statement must return an int"
 
--- New L2 control flow statements
 checkStmt (If cond thenStmt elseStmt _) = do
     condType <- checkExprType cond
     unless (condType == BoolType) $
@@ -170,13 +154,11 @@ checkStmt (While cond body _) = do
     withLoop True $ checkStmt body
 
 checkStmt (For maybeInit maybeCond maybeStep body _) = do
-    withScope $ do -- Create a new scope for the whole for-loop construct
-        -- Check initializer
+    withScope $ do
         case maybeInit of
             Just initStmt -> checkStmt initStmt
             Nothing -> return ()
 
-        -- Check condition
         case maybeCond of
             Just condExpr -> do
                 condType <- checkExprType condExpr
@@ -184,18 +166,16 @@ checkStmt (For maybeInit maybeCond maybeStep body _) = do
                     semanticFail' "For loop condition must be a boolean expression"
             Nothing -> return ()
 
-        -- Check step and body in loop context
         withLoop True $ do
             checkStmt body
             
-            -- Add specific checks to forbid declarations in the step clause
             case maybeStep of
                 Just (Decl _ _ pos) ->
                     semanticFail' $ "Declaration not allowed in for-loop step clause at: " ++ posPretty pos
                 Just (Init _ _ _ pos) ->
                     semanticFail' $ "Declaration not allowed in for-loop step clause at: " ++ posPretty pos
                 Just stepStmt ->
-                    checkStmt stepStmt -- Allow other valid statements (e.g., assignments)
+                    checkStmt stepStmt
                 Nothing ->
                     return ()
 
@@ -211,10 +191,8 @@ checkStmt (Continue pos) = do
 
 checkStmt (BlockStmt stmts _) = withScope $ mapM_ checkStmt stmts
 
--- Type checking for expressions
 checkExprType :: Expr -> L1Semantic Type
 checkExprType (IntExpr str pos) = do
-    -- Check that literals are in bounds
     let res = parseNumber str
     case res of
         Left e -> do
@@ -261,33 +239,27 @@ checkExprType (BinExpr op lhs rhs) = do
     lhsType <- checkExprType lhs
     rhsType <- checkExprType rhs
     case op of
-        -- Arithmetic operators
         Add -> arithmeticOp lhsType rhsType
         Mul -> arithmeticOp lhsType rhsType
         Sub -> arithmeticOp lhsType rhsType  
         Div -> arithmeticOp lhsType rhsType
         Mod -> arithmeticOp lhsType rhsType
         
-        -- Comparison operators
         Lt -> comparisonOp lhsType rhsType
         Le -> comparisonOp lhsType rhsType
         Gt -> comparisonOp lhsType rhsType
         Ge -> comparisonOp lhsType rhsType
         
-        -- Equality operators (polymorphic)
         Eq -> equalityOp lhsType rhsType
         Ne -> equalityOp lhsType rhsType
         
-        -- Logical operators
         And -> logicalOp lhsType rhsType
         Or -> logicalOp lhsType rhsType
         
-        -- Bitwise operators
         BitAnd -> bitwiseOp lhsType rhsType
         BitOr -> bitwiseOp lhsType rhsType
         BitXor -> bitwiseOp lhsType rhsType
         
-        -- Shift operators
         Shl -> shiftOp lhsType rhsType
         Shr -> shiftOp lhsType rhsType
         
@@ -340,15 +312,13 @@ checkReturns (Block stmts _) = do
     let returns = stmtsReturn stmts
     unless returns $ semanticFail' "Program does not return"
 
--- Check if a list of statements returns
 stmtsReturn :: [Stmt] -> Bool
 stmtsReturn [] = False
 stmtsReturn (stmt:rest) = 
     if stmtReturns stmt 
-    then True  -- This statement returns, so the sequence returns
-    else stmtsReturn rest  -- Check the rest
+    then True
+    else stmtsReturn rest
 
--- Check if a single statement returns (following L2 spec)
 stmtReturns :: Stmt -> Bool
 stmtReturns (Decl _ _ _) = False
 stmtReturns (Init _ _ _ _) = False  
@@ -356,11 +326,10 @@ stmtReturns (Asgn _ _ _ _) = False
 stmtReturns (Ret _ _) = True
 stmtReturns (If _ thenStmt elseStmt _) = 
     case elseStmt of
-        Just elseS -> stmtReturns thenStmt && stmtReturns elseS  -- Both branches must return
-        Nothing -> False  -- If without else doesn't guarantee return
-stmtReturns (While _ _ _) = False  -- While loops don't guarantee return (might not execute)
-stmtReturns (For _ _ _ _ _) = False  -- For loops don't guarantee return  
+        Just elseS -> stmtReturns thenStmt && stmtReturns elseS
+        Nothing -> False
+stmtReturns (While _ _ _) = False
+stmtReturns (For _ _ _ _ _) = False  
 stmtReturns (Break _) = False
 stmtReturns (Continue _) = False
 stmtReturns (BlockStmt stmts _) = stmtsReturn stmts
-
