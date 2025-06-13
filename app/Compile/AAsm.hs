@@ -6,7 +6,7 @@ import Compile.AST (AST (..), Expr (..), Op (..), Stmt (..))
 import Compile.Parser (parseNumber)
 
 import Control.Monad.State (State, execState, get, gets, modify, put)
-import Control.Monad (unless)
+import Control.Monad (unless, void)
 import Data.Bits ((.&.), (.|.), xor, complement, shiftL, shiftR)
 import qualified Data.Map as Map
 
@@ -191,34 +191,28 @@ genStmt (For maybeInit maybeCond maybeStep body _) = do
     startLbl <- freshLabel "for_start_"
     stepLbl <- freshLabel "for_step_"
     endLbl <- freshLabel "for_end_"
-    
     case maybeInit of
-        Just initStmt -> do _ <- genStmt initStmt; return ()
+        Just initStmt -> void $ genStmt initStmt
         Nothing -> return ()
-    
     let bodyModified = maybe [] findModifiedVars maybeStep ++ findModifiedVars body
     mapM_ clearConst bodyModified
-    
     pushLoopLabels endLbl stepLbl
-    
     emit $ startLbl ++ ":"
-    
     case maybeCond of
         Just condExpr -> do
             condReg <- genExpr condExpr
             emit $ "if " ++ regName condReg ++ " == 0 goto " ++ endLbl
         Nothing -> return ()
-    
-    _ <- genStmt body
-    
+    void $ genStmt body
+    case maybeStep of
+        Just _ -> emit $ "goto " ++ stepLbl
+        Nothing -> return ()
     emit $ stepLbl ++ ":"
     case maybeStep of
-        Just stepStmt -> do _ <- genStmt stepStmt; return ()
+        Just stepStmt -> void $ genStmt stepStmt
         Nothing -> return ()
-    
     emit $ "goto " ++ startLbl
     emit $ endLbl ++ ":"
-    
     popLoopLabels
     return False
 
@@ -383,6 +377,7 @@ genOr e1 e2 = do
     resultReg <- freshReg
     checkRhsLbl <- freshLabel "or_rhs_"
     trueLbl <- freshLabel "or_true_"
+    falseLbl <- freshLabel "or_false_"
     endLbl <- freshLabel "or_end_"
 
     r1 <- genExpr e1
@@ -391,10 +386,10 @@ genOr e1 e2 = do
 
     emit $ checkRhsLbl ++ ":"
     r2 <- genExpr e2
-    emit $ "if " ++ regName r2 ++ " == 0 goto both_false"
+    emit $ "if " ++ regName r2 ++ " == 0 goto " ++ falseLbl
     emit $ "goto " ++ trueLbl
 
-    emit $ "both_false:"
+    emit $ falseLbl ++ ":"
     emit $ regName resultReg ++ " = 0"
     emit $ "goto " ++ endLbl
 
@@ -403,6 +398,7 @@ genOr e1 e2 = do
 
     emit $ endLbl ++ ":"
     return resultReg
+
 
 varUsedInExpr :: String -> Expr -> Bool
 varUsedInExpr name (Ident n _) = name == n
