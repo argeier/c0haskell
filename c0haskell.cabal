@@ -13,7 +13,7 @@ build-type:         Simple
 common warnings
     ghc-options: -Wall
 
-executable l1c
+executable c0haskell
     import:           warnings
     main-is:          Main.hs
     build-depends:

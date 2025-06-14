@@ -4,7 +4,7 @@ module Compile.Semantic (
 
 import Compile.AST (AST (..), Expr (..), Stmt (..), Type (..), Op (..), posPretty)
 import Compile.Parser (parseNumber)
-import Error (L1ExceptT, semanticFail)
+import Error (C0ExceptT, semanticFail)
 
 import Control.Monad.State (
     MonadState (get, put),
@@ -30,21 +30,21 @@ data SemanticContext = SemanticContext
     , inLoop :: Bool
     } deriving (Show)
 
-type L1Semantic = StateT SemanticContext L1ExceptT
+type C0Semantic  = StateT SemanticContext C0ExceptT
 
-semanticFail' :: String -> L1Semantic a
+semanticFail' :: String -> C0Semantic  a
 semanticFail' = lift . semanticFail
 
-semanticAnalysis :: AST -> L1ExceptT ()
+semanticAnalysis :: AST -> C0ExceptT ()
 semanticAnalysis ast@(Block stmts _) = do
     evalStateT (checkAllStmts stmts) (SemanticContext Map.empty False)
     ctx <- varStatusAnalysis ast
     evalStateT (checkReturns ast) ctx
 
-checkAllStmts :: [Stmt] -> L1Semantic ()
+checkAllStmts :: [Stmt] -> C0Semantic  ()
 checkAllStmts = checkStmtSequence
 
-checkStmtSequence :: [Stmt] -> L1Semantic ()
+checkStmtSequence :: [Stmt] -> C0Semantic  ()
 checkStmtSequence [] = return ()
 checkStmtSequence (stmt:rest) = do
     checkStmt stmt
@@ -64,23 +64,23 @@ checkStmtSequence (stmt:rest) = do
     stmtDefinesAllVars (Continue _) = True
     stmtDefinesAllVars _ = False
 
-varStatusAnalysis :: AST -> L1ExceptT SemanticContext
+varStatusAnalysis :: AST -> C0ExceptT SemanticContext
 varStatusAnalysis (Block stmts _) = do
     finalCtx <- execStateT (checkStmtsUntilReturn stmts) (SemanticContext Map.empty False)
     return finalCtx
 
-getNamespace :: L1Semantic Namespace
+getNamespace :: C0Semantic  Namespace
 getNamespace = variables <$> get
 
-putNamespace :: Namespace -> L1Semantic ()
+putNamespace :: Namespace -> C0Semantic  ()
 putNamespace ns = do
     ctx <- get
     put ctx { variables = ns }
 
-isInLoop :: L1Semantic Bool
+isInLoop :: C0Semantic  Bool
 isInLoop = inLoop <$> get
 
-withLoop :: Bool -> L1Semantic a -> L1Semantic a
+withLoop :: Bool -> C0Semantic  a -> C0Semantic  a
 withLoop loopStatus action = do
     ctx <- get
     put ctx { inLoop = loopStatus }
@@ -89,7 +89,7 @@ withLoop loopStatus action = do
     put ctx' { inLoop = inLoop ctx }
     return result
     
-withScope :: L1Semantic a -> L1Semantic a
+withScope :: C0Semantic  a -> C0Semantic  a
 withScope action = do
     originalNamespace <- getNamespace
     result <- action
@@ -98,7 +98,7 @@ withScope action = do
     putNamespace restoredNamespace
     return result
 
-checkStmt :: Stmt -> L1Semantic ()
+checkStmt :: Stmt -> C0Semantic  ()
 checkStmt (Decl typ name pos) = do
     ns <- getNamespace
     let isDeclared = Map.member name ns
@@ -246,7 +246,7 @@ checkStmt (Continue pos) = do
 
 checkStmt (BlockStmt stmts _) = withScope $ checkStmtSequence stmts
 
-checkExprType :: Expr -> L1Semantic Type
+checkExprType :: Expr -> C0Semantic  Type
 checkExprType (IntExpr str pos) = do
     let res = parseNumber str
     case res of
@@ -353,7 +353,7 @@ checkExprType (TernaryExpr cond thenExpr elseExpr _) = do
         semanticFail' "Ternary operator branches must have the same type"
     return thenType
 
-checkReturns :: AST -> L1Semantic ()
+checkReturns :: AST -> C0Semantic  ()
 checkReturns (Block stmts _) = do
     let returns = stmtsReturn stmts
     unless returns $ semanticFail' "Program does not return"
@@ -380,7 +380,7 @@ stmtReturns (Break _) = False
 stmtReturns (Continue _) = False
 stmtReturns (BlockStmt stmts _) = stmtsReturn stmts
 
-checkStmtsUntilReturn :: [Stmt] -> L1Semantic ()
+checkStmtsUntilReturn :: [Stmt] -> C0Semantic  ()
 checkStmtsUntilReturn [] = return ()
 checkStmtsUntilReturn (stmt : rest) = do
     isReturn <- checkStmtReturns stmt
@@ -388,7 +388,7 @@ checkStmtsUntilReturn (stmt : rest) = do
         then return ()
         else checkStmtsUntilReturn rest
 
-checkStmtReturns :: Stmt -> L1Semantic Bool
+checkStmtReturns :: Stmt -> C0Semantic  Bool
 checkStmtReturns stmt@(Ret _ _) = do
     checkStmt stmt
     return True

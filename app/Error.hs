@@ -1,5 +1,5 @@
 module Error (
-    L1ExceptT,
+    C0ExceptT,
     generalFail,
     parserFail,
     semanticFail,
@@ -18,26 +18,26 @@ semanticErrorCode :: Int
 semanticErrorCode = 7
 
 -- Error message and exit code
-data L1Error
+data C0Error
     = Error String Int
     | ParserError String
     | SemanticError String
     deriving (Show)
 
-type L1ExceptT = ExceptT L1Error IO
+type C0ExceptT = ExceptT C0Error IO
 
 -- Convenienve functions to throw exceptions
-generalFail :: String -> Int -> L1ExceptT a
+generalFail :: String -> Int -> C0ExceptT a
 generalFail msg code = throwError $ Error msg code
 
-parserFail :: String -> L1ExceptT a
+parserFail :: String -> C0ExceptT a
 parserFail = throwError . ParserError
 
-semanticFail :: String -> L1ExceptT a
+semanticFail :: String -> C0ExceptT a
 semanticFail = throwError . SemanticError
 
 -- Exit with an error message and a return code
-dieWithError :: L1Error -> IO ()
+dieWithError :: C0Error -> IO ()
 dieWithError (Error msg code) = do
     hPutStrLn stderr msg
     Exit.exitWith $ Exit.ExitFailure code

@@ -7,7 +7,7 @@ import Compile.AAsm (codeGen)
 import Compile.Parser (parseAST)
 import Compile.Semantic (semanticAnalysis)
 import Compile.X86 (generateX86)
-import Error (L1ExceptT, generalFail)
+import Error (C0ExceptT, generalFail)
 import System.Exit (ExitCode (..))
 import System.FilePath (replaceExtension)
 import System.Process (system)
@@ -23,7 +23,7 @@ data Job = Job
     }
     deriving (Show)
 
-compile :: Job -> L1ExceptT ()
+compile :: Job -> C0ExceptT ()
 compile job = do
     ast <- parseAST $ src job
     case astOut job of

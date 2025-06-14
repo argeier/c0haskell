@@ -4,7 +4,7 @@ module Args (
 ) where
 
 import Compile (Job (..), src)
-import Error (L1ExceptT, generalFail)
+import Error (C0ExceptT, generalFail)
 import System.Directory (doesFileExist)
 
 import Control.Monad (unless)
@@ -52,11 +52,11 @@ jobParser =
     info
         (jobP <**> helper)
         ( fullDesc
-            <> progDesc "Compile L1 programs to a simple abstract assembly language"
-            <> header "An simple starter compiler for the L1 language"
+            <> progDesc "Compile C0 programs to a simple abstract assembly language"
+            <> header "An simple starter compiler for the C0 language"
         )
 
-validateJob :: Job -> L1ExceptT Job
+validateJob :: Job -> C0ExceptT Job
 validateJob job = do
     let sourceFile = src job
     exists <- liftIO $ doesFileExist sourceFile

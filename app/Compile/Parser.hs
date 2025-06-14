@@ -4,7 +4,7 @@ module Compile.Parser (
 ) where
 
 import Compile.AST (AST (..), Expr (..), Op (..), Stmt (..), Type (..))
-import Error (L1ExceptT, parserFail)
+import Error (C0ExceptT, parserFail)
 
 import Control.Monad.Combinators.Expr (
     Operator (InfixL, InfixR, Prefix),
@@ -43,7 +43,7 @@ import Text.Megaparsec.Char (
  )
 import qualified Text.Megaparsec.Char.Lexer as L
 
-parseAST :: FilePath -> L1ExceptT AST
+parseAST :: FilePath -> C0ExceptT AST
 parseAST path = do
     text <- liftIO $ readFile path
     case parse astParser path text of
