@@ -185,6 +185,8 @@ genStmt (If cond thenStmt elseStmt _) = do
 genStmt (While cond body _) = do
     startLbl <- freshLabel "while_start_"
     endLbl <- freshLabel "while_end_"
+    let bodyModified = findModifiedVars body
+    mapM_ clearConst bodyModified
     
     pushLoopLabels endLbl startLbl
     
