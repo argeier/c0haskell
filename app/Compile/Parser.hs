@@ -7,7 +7,7 @@ import Compile.AST (AST (..), Expr (..), Op (..), Stmt (..), Type (..))
 import Error (L1ExceptT, parserFail)
 
 import Control.Monad.Combinators.Expr (
-    Operator (InfixL, Prefix),
+    Operator (InfixL, InfixR, Prefix),
     makeExprParser,
  )
 import Control.Monad.IO.Class (liftIO)
@@ -25,6 +25,7 @@ import Text.Megaparsec (
     chunk,
     errorBundlePretty,
     getSourcePos,
+    lookAhead,
     many,
     oneOf,
     optional,
@@ -102,7 +103,7 @@ stmt = choice
     ] <?> "statement"
   where
     semicolonStmt = do
-        s <- choice [try decl, try simp, ret]
+        s <- choice [try decl, simp, ret]
         semi
         return s
 
@@ -138,12 +139,12 @@ forStmt = do
     void $ symbol "("
     forInit <- optional (choice [try decl, simp]) <?> "for loop initializer"
     semi
-    cond <- expr <?> "for loop condition"
+    cond <- optional expr <?> "for loop condition"
     semi
-    step <- optional (choice [try decl, simp]) <?> "for loop step"
+    step <- optional simp <?> "for loop step"
     void $ symbol ")"
     body <- stmt <?> "for loop body"
-    return $ For forInit (Just cond) step body pos
+    return $ For forInit cond step body pos
 
 breakStmt :: Parser Stmt
 breakStmt = do
@@ -181,7 +182,7 @@ declInit = do
 simp :: Parser Stmt
 simp = do
     pos <- getSourcePos
-    name <- lvalue
+    name <- try (lvalue <* lookAhead asnOp)
     op <- asnOp
     e <- expr
     return $ Asgn name op e pos
@@ -215,7 +216,7 @@ ret = do
 expr' :: Parser Expr
 expr' = choice
     [ parens expr
-    , boolExpr
+    , try boolExpr
     , intExpr
     , identExpr
     ]
@@ -267,31 +268,25 @@ opTable =
     , [InfixL (BinExpr BitOr <$ try (symbol "|" <* notFollowedBy (char '|')))]
     , [InfixL (BinExpr And <$ try (symbol "&&"))]
     , [InfixL (BinExpr Or <$ try (symbol "||"))]
+    , [InfixR ternaryOp]
     ]
   where
     manyUnaryOp = foldr1 (.) <$> some unaryOpChoice
-    unaryOpChoice = choice 
+    unaryOpChoice = choice
         [ UnExpr Neg <$ symbol "-"
         , UnExpr Not <$ symbol "!"
         , UnExpr BitNot <$ symbol "~"
         ]
+    ternaryOp :: Parser (Expr -> Expr -> Expr)
+    ternaryOp = do
+        pos <- getSourcePos <* symbol "?"
+        thenExpr <- expr
+        void $ symbol ":"
+        return (\condExpr elseExpr -> TernaryExpr condExpr thenExpr elseExpr pos)
+
 
 expr :: Parser Expr
-expr = ternaryExpr <?> "expression"
-
-ternaryExpr :: Parser Expr
-ternaryExpr = do
-    e1 <- makeExprParser expr' opTable
-    pos <- getSourcePos
-    maybeTernary <- optional $ do
-        void $ symbol "?"
-        e2 <- ternaryExpr
-        void $ symbol ":"
-        e3 <- ternaryExpr
-        return $ TernaryExpr e1 e2 e3 pos
-    case maybeTernary of
-        Nothing -> return e1
-        Just ternary -> return ternary
+expr = makeExprParser expr' opTable <?> "expression"
 
 sc :: Parser ()
 sc = L.space whitespace lineComment blockComment

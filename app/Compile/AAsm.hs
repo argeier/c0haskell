@@ -155,18 +155,30 @@ genStmt (If cond thenStmt elseStmt _) = do
     elseLbl <- freshLabel "else_"
     endLbl <- freshLabel "end_if_"
     
+    originalConstMap <- gets constMap
+
     emit $ "if " ++ regName condReg ++ " == 0 goto " ++ elseLbl
     
     thenReturns <- genStmt thenStmt
+    constMapAfterThen <- gets constMap
     
-    unless thenReturns $ emit $ "goto " ++ endLbl
+    case elseStmt of
+        Just _ -> unless thenReturns $ emit $ "goto " ++ endLbl
+        Nothing -> return ()
     
     emit $ elseLbl ++ ":"
-    elseReturns <- case elseStmt of
-        Just stmt -> genStmt stmt
-        Nothing -> return False
+    modify $ \s -> s { constMap = originalConstMap }
     
+    (elseReturns, constMapAfterElse) <- case elseStmt of
+        Just stmt -> do
+            r <- genStmt stmt
+            cm <- gets constMap
+            return (r, cm)
+        Nothing -> return (False, originalConstMap)
+
     unless (thenReturns && elseReturns) $ emit $ endLbl ++ ":"
+    let finalConstMap = Map.filterWithKey (\k v -> Map.lookup k constMapAfterElse == Just v) constMapAfterThen
+    modify $ \s -> s { constMap = finalConstMap }
     
     return (thenReturns && elseReturns)
 
