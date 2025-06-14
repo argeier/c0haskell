@@ -139,10 +139,8 @@ forStmt = do
     void $ symbol "("
     forInit <- optional (choice [try decl, simp]) <?> "for loop initializer"
     semi
-    cond <- optional expr <?> "for loop condition"
+    cond <- Just <$> expr <?> "for loop condition"
     semi
-    -- This is the corrected line. It now allows declarations in the step part,
-    -- which the semantic analyzer will later reject as per the language rules.
     step <- optional (choice [try decl, simp]) <?> "for loop step"
     void $ symbol ")"
     body <- stmt <?> "for loop body"
