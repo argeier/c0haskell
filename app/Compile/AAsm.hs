@@ -205,6 +205,7 @@ genStmt (For maybeInit maybeCond maybeStep body _) = do
     startLbl <- freshLabel "for_start_"
     stepLbl <- freshLabel "for_step_"
     endLbl <- freshLabel "for_end_"
+    modify $ \s -> s { constMap = Map.empty }
     case maybeInit of
         Just initStmt -> void $ genStmt initStmt
         Nothing -> return ()
