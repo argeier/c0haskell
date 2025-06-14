@@ -174,19 +174,23 @@ checkStmt (If cond thenStmt elseStmt _) = do
             originalNs <- getNamespace
             checkStmt thenStmt
             thenNs <- getNamespace
+            let thenTransfers = stmtTransfersControl thenStmt
             putNamespace originalNs
             checkStmt elseS
             elseNs <- getNamespace
-            let finalNs = Map.mapWithKey (updateIfBothInit thenNs elseNs) originalNs
+            let elseTransfers = stmtTransfersControl elseS
+            let finalNs = Map.mapWithKey (updateIfBothInit thenNs elseNs thenTransfers elseTransfers) originalNs
             putNamespace finalNs
         Nothing -> do
             savedNs <- getNamespace
             checkStmt thenStmt
             putNamespace savedNs
   where
-    updateIfBothInit thenNs elseNs varName originalStatus =
+    updateIfBothInit thenNs elseNs thenTransfers elseTransfers varName originalStatus =
         case (Map.lookup varName thenNs, Map.lookup varName elseNs, originalStatus) of
             (Just (Initialized typ), Just (Initialized _), Declared _) -> Initialized typ
+            (Just (Initialized typ), _, Declared _) | elseTransfers -> Initialized typ
+            (_, Just (Initialized typ), Declared _) | thenTransfers -> Initialized typ
             _ -> originalStatus
 
 checkStmt (While cond body _) = do
@@ -399,3 +403,22 @@ checkStmtReturns stmt@(BlockStmt stmts _) = do
 checkStmtReturns stmt = do
     checkStmt stmt
     return False
+
+
+stmtTransfersControl :: Stmt -> Bool
+stmtTransfersControl (Ret _ _) = True
+stmtTransfersControl (Break _) = True
+stmtTransfersControl (Continue _) = True
+stmtTransfersControl (If _ thenStmt elseStmt _) = 
+    case elseStmt of
+        Just elseS -> stmtTransfersControl thenStmt && stmtTransfersControl elseS
+        Nothing -> False
+stmtTransfersControl (BlockStmt stmts _) = stmtsTransferControl stmts
+stmtTransfersControl _ = False
+
+stmtsTransferControl :: [Stmt] -> Bool
+stmtsTransferControl [] = False
+stmtsTransferControl (stmt:rest) = 
+    if stmtTransfersControl stmt
+    then True
+    else stmtsTransferControl rest
