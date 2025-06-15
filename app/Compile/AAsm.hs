@@ -13,10 +13,9 @@ import Compile.AST (Op(..))
 import Compile.Parser (parseNumber)
 
 import Control.Monad (unless, void)
-import Control.Monad.State (State, execState, get, gets, modify, put)
+import Control.Monad.State (State, execState, gets, modify)
 import Data.Bits ((.&.), (.|.), complement, shiftL, shiftR, xor)
 import qualified Data.Map.Strict as Map
-import Data.List (intercalate)
 import Data.Maybe (isJust)
 
 type Register = Integer

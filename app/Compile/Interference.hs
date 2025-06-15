@@ -9,7 +9,6 @@ import Compile.Liveness (LiveOutMap)
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import Data.List (foldl')
 
 -- Adjacency list: each register maps to a set of registers it interferes with
 type Graph = Map.Map Register (Set.Set Register)

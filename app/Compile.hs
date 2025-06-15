@@ -17,7 +17,7 @@ import Control.Monad.IO.Class (MonadIO (liftIO))
 
 import Compile.Liveness (livenessAnalysis, LiveOutMap)
 import Compile.Interference (buildGraph, Graph)
-import Compile.Coloring (colorGraph, Allocation)
+import Compile.Coloring (colorGraph)
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
