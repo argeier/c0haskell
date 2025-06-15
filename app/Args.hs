@@ -9,23 +9,7 @@ import System.Directory (doesFileExist)
 
 import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
-import Options.Applicative (
-    Parser,
-    ParserInfo,
-    argument,
-    fullDesc,
-    header,
-    help,
-    helper,
-    info,
-    long,
-    metavar,
-    optional,
-    progDesc,
-    str,
-    strOption,
-    (<**>),
- )
+import Options.Applicative
 
 jobP :: Parser Job
 jobP =
@@ -46,7 +30,27 @@ jobP =
                     <> help "Dump abstract assembly to this file"
                 )
             )
-
+        <*> optional
+            ( strOption
+                ( long "dump-liveness"
+                    <> metavar "LIVENESS_OUTPUT"
+                    <> help "Dump AAsm annotated with liveness information"
+                )
+            )
+        <*> optional
+            ( strOption
+                ( long "dump-graph"
+                    <> metavar "GRAPH_OUTPUT"
+                    <> help "Dump the interference graph"
+                )
+            )
+        <*> optional
+            ( strOption
+                ( long "dump-alloc"
+                    <> metavar "ALLOC_OUTPUT"
+                    <> help "Dump the final register allocation map"
+                )
+            )
 jobParser :: ParserInfo Job
 jobParser =
     info

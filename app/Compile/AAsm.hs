@@ -1,18 +1,74 @@
 module Compile.AAsm (
     codeGen,
+    AAsmProgram,
+    AAsmInstruction (..),
+    Terminator (..),
+    BasicBlock (..),
+    Register,
+    Label,
 ) where
 
-import Compile.AST (AST (..), Expr (..), Op (..), Stmt (..))
+import qualified Compile.AST as AST
+import Compile.AST (Op(..))
 import Compile.Parser (parseNumber)
 
-import Control.Monad.State (State, execState, get, gets, modify, put)
 import Control.Monad (unless, void)
-import Data.Bits ((.&.), (.|.), xor, complement, shiftL, shiftR)
-import qualified Data.Map as Map
+import Control.Monad.State (State, execState, get, gets, modify, put)
+import Data.Bits ((.&.), (.|.), complement, shiftL, shiftR, xor)
+import qualified Data.Map.Strict as Map
+import Data.List (intercalate)
+import Data.Maybe (isJust)
 
 type Register = Integer
 type VarName = String
 type Label = String
+
+data AAsmInstruction
+    = AAsmBinOp Op Register Register Register
+    | AAsmUnOp Op Register Register
+    | AAsmAsgnOp Op Register Register
+    | AAsmMove Register Register
+    | AAsmLoadImm Register Integer
+    deriving (Eq)
+
+data Terminator
+    = Ret Register
+    | Goto Label
+    | CondGoto Register Label Label
+    deriving (Eq)
+
+data BasicBlock = BasicBlock
+    { blockLabel :: Label
+    , blockInstructions :: [AAsmInstruction]
+    , blockTerminator :: Terminator
+    }
+    deriving (Eq)
+
+type AAsmProgram = [BasicBlock]
+
+data FlatInstruction
+    = FInstr AAsmInstruction
+    | FTerm Terminator
+    | FLabel Label
+    deriving (Eq)
+
+instance Show AAsmInstruction where
+    show (AAsmBinOp op res src1 src2) = unwords [regName res, "=", regName src1, show op, regName src2]
+    show (AAsmUnOp op res src)       = unwords [regName res, "=", show op, regName src]
+    show (AAsmAsgnOp op dest src)    = unwords [regName dest, show op ++ "=", regName src]
+    show (AAsmMove dest src)         = unwords [regName dest, "=", regName src]
+    show (AAsmLoadImm dest val)      = unwords [regName dest, "=", show val]
+
+instance Show Terminator where
+    show (Ret reg)               = "ret " ++ regName reg
+    show (Goto l)                = "goto " ++ l
+    show (CondGoto reg lTrue lFalse) = unwords ["if", regName reg, "== 0", "goto", lTrue, "; else", lFalse]
+
+instance Show BasicBlock where
+    show (BasicBlock lbl instrs term) =
+        lbl ++ ":\n" ++
+        unlines (map (("  " ++) . show) instrs) ++
+        "  " ++ show term ++ "\n"
 
 type AAsmAlloc = Map.Map VarName Register
 type ConstEnv = Map.Map VarName Integer
@@ -24,409 +80,342 @@ data CodeGenState = CodeGenState
     , nextLabel :: Integer
     , breakLabels :: [Label]
     , continueLabels :: [Label]
-    , code :: [String]
+    , code :: [FlatInstruction]
     }
 
 type CodeGen a = State CodeGenState a
 
-codeGen :: AST -> [String]
-codeGen (Block stmts _) =
-    code $ execState (genBlock stmts) (CodeGenState Map.empty Map.empty 0 0 [] [] [])
+initialCodeGenState :: CodeGenState
+initialCodeGenState = CodeGenState Map.empty Map.empty 0 0 [] [] []
+
+codeGen :: AST.AST -> AAsmProgram
+codeGen (AST.Block stmts _) =
+    let flatCode = reverse . code $ execState (genBlock stmts) initialCodeGenState
+    in partitionIntoBlocks flatCode
+
+partitionIntoBlocks :: [FlatInstruction] -> AAsmProgram
+partitionIntoBlocks flatCode =
+    let prefixedCode = case flatCode of
+            (FLabel _ : _) -> flatCode
+            _              -> FLabel "entry" : flatCode
+    in toBlocks prefixedCode
+  where
+    toBlocks :: [FlatInstruction] -> [BasicBlock]
+    toBlocks [] = []
+    toBlocks (FLabel l : rest) =
+        let (instrs, remainingCode) = span isInstruction rest
+            (term, afterTerm) = case remainingCode of
+                (FTerm t : xs) -> (t, xs)
+                (FLabel nextL : _) -> (Goto nextL, remainingCode)
+                [] -> (Ret 0, [])
+                _ -> error "AAsm.partitionIntoBlocks: block not properly terminated"
+            typedInstrs = [i | FInstr i <- instrs]
+        in BasicBlock l typedInstrs term : toBlocks afterTerm
+    toBlocks _ = error "Code does not start with a label. This should not happen due to the prefixing logic."
+
+    isInstruction (FInstr _) = True
+    isInstruction _          = False
 
 regName :: Register -> String
 regName n = "%" ++ show n
 
 freshReg :: CodeGen Register
-freshReg = do
-    s <- get
-    let r = nextReg s
-    put s{nextReg = r + 1}
-    return r
+freshReg = gets nextReg <* modify (\s -> s { nextReg = nextReg s + 1 })
 
 freshLabel :: String -> CodeGen Label
 freshLabel prefix = do
-    s <- get
-    let n = nextLabel s
-    put s{nextLabel = n + 1}
+    n <- gets nextLabel
+    modify $ \s -> s { nextLabel = n + 1 }
     return $ prefix ++ show n
 
 assignVar :: VarName -> Register -> CodeGen ()
-assignVar name r = modify $ \s ->
-    s{regMap = Map.insert name r (regMap s)}
+assignVar name r = modify $ \s -> s { regMap = Map.insert name r (regMap s) }
 
 bindConst :: VarName -> Integer -> CodeGen ()
-bindConst name v = modify $ \s ->
-    s{constMap = Map.insert name v (constMap s)}
+bindConst name v = modify $ \s -> s { constMap = Map.insert name v (constMap s) }
 
 clearConst :: VarName -> CodeGen ()
-clearConst name = modify $ \s ->
-    s{constMap = Map.delete name (constMap s)}
+clearConst name = modify $ \s -> s { constMap = Map.delete name (constMap s) }
 
 lookupVar :: VarName -> CodeGen Register
-lookupVar name = do
-    m <- gets regMap
-    case Map.lookup name m of
-        Just r -> return r
-        Nothing -> error $ "lookupVar: variable not found: " ++ name
+lookupVar name = gets (regMap) >>= \m -> case Map.lookup name m of
+    Just r -> return r
+    Nothing -> error $ "lookupVar: variable not found: " ++ name
 
-emit :: String -> CodeGen ()
-emit instr = modify $ \s -> s{code = code s ++ [instr]}
+emit :: FlatInstruction -> CodeGen ()
+emit instr = modify $ \s -> s { code = instr : code s }
 
 pushLoopLabels :: Label -> Label -> CodeGen ()
-pushLoopLabels breakLbl continueLbl = modify $ \s ->
-    s { breakLabels = breakLbl : breakLabels s
-      , continueLabels = continueLbl : continueLabels s
-      }
+pushLoopLabels breakLbl continueLbl = modify $ \s -> s { breakLabels = breakLbl : breakLabels s, continueLabels = continueLbl : continueLabels s }
 
 popLoopLabels :: CodeGen ()
 popLoopLabels = modify $ \s ->
-    s { breakLabels = case breakLabels s of
-                        (_:rest) -> rest
-                        [] -> []
-      , continueLabels = case continueLabels s of
-                           (_:rest) -> rest
-                           [] -> []
-      }
+    let newBreaks    = case breakLabels s of (_:xs) -> xs; [] -> []
+        newContinues = case continueLabels s of (_:xs) -> xs; [] -> []
+    in s { breakLabels = newBreaks, continueLabels = newContinues }
 
-genBlock :: [Stmt] -> CodeGen ()
-genBlock [] = return ()
+genBlock :: [AST.Stmt] -> CodeGen Bool
+genBlock [] = return False
 genBlock (stmt : rest) = do
-    isReturn <- genStmt stmt
-    if isReturn
-        then return ()
+    branches <- genStmt stmt
+    if branches
+        then return True
         else genBlock rest
 
-genStmt :: Stmt -> CodeGen Bool
-genStmt (Decl _ name _) = do
-    freshReg >>= assignVar name
-    return False
+genStmt :: AST.Stmt -> CodeGen Bool
+genStmt (AST.Decl _ name _) = freshReg >>= assignVar name >> return False
 
-genStmt (Init _ name e _) = do
+genStmt (AST.Init _ name e _) = do
     destReg <- freshReg
     assignVar name destReg
-
-    case e of
-        Ident _ _ -> do
-            srcReg <- genExpr e
-            emit $ regName destReg ++ " = " ++ regName srcReg
-            clearConst name
-        _ -> do
-            me <- constEval e
-            case me of
-                Just v -> do
-                    emit $ regName destReg ++ " = " ++ show v
-                    bindConst name v
-                Nothing -> do
-                    srcReg <- genExpr e
-                    emit $ regName destReg ++ " = " ++ regName srcReg
-                    clearConst name
-    return False
-
-genStmt (Asgn name Nothing e _) = do
-    let usesItself = varUsedInExpr name e
-    me <- if usesItself then return Nothing else constEval e
-    destReg <- lookupVar name
-    
+    me <- constEval e
     case me of
-        Just v -> do
-            emit $ regName destReg ++ " = " ++ show v
-            bindConst name v
-        Nothing -> do
-            srcReg <- genExpr e
-            emit $ regName destReg ++ " = " ++ regName srcReg
-            clearConst name
-                        
+        Just v  -> emit (FInstr $ AAsmLoadImm destReg v) >> bindConst name v
+        Nothing -> genExpr e >>= \srcReg -> emit (FInstr $ AAsmMove destReg srcReg) >> clearConst name
     return False
 
-genStmt (Asgn name (Just op) e _) = do
+genStmt (AST.Asgn name Nothing e _) = do
+    destReg <- lookupVar name
+    me <- constEval e
+    case me of
+        Just v  -> emit (FInstr $ AAsmLoadImm destReg v) >> bindConst name v
+        Nothing -> genExpr e >>= \srcReg -> emit (FInstr $ AAsmMove destReg srcReg) >> clearConst name
+    return False
+
+genStmt (AST.Asgn name (Just op) e _) = do
     r' <- genExpr e
     lhs <- lookupVar name
-    emit $ regName lhs ++ " " ++ show op ++ "= " ++ regName r'
+    emit (FInstr $ AAsmAsgnOp op lhs r')
     clearConst name
     return False
 
-genStmt (Ret e _) = do
-    r <- genExpr e
-    emit ("ret " ++ regName r)
-    return True
+genStmt (AST.Ret e _) = genExpr e >>= \r -> emit (FTerm $ Ret r) >> return True
 
-genStmt (If cond thenStmt elseStmt _) = do
+genStmt (AST.If cond thenStmt elseStmt _) = do
     condReg <- genExpr cond
+    thenLbl <- freshLabel "then_"
     elseLbl <- freshLabel "else_"
     endLbl <- freshLabel "end_if_"
-    
+
     originalConstMap <- gets constMap
 
-    emit $ "if " ++ regName condReg ++ " == 0 goto " ++ elseLbl
-    
-    thenReturns <- genStmt thenStmt
+    let falseBranchTarget = if isJust elseStmt then elseLbl else endLbl
+    emit $ FTerm $ CondGoto condReg falseBranchTarget thenLbl
+
+    emit $ FLabel thenLbl
+    returnedInThen <- genStmt thenStmt
     constMapAfterThen <- gets constMap
+    unless returnedInThen $ emit $ FTerm $ Goto endLbl
     
-    case elseStmt of
-        Just _ -> unless thenReturns $ emit $ "goto " ++ endLbl
-        Nothing -> return ()
-    
-    emit $ elseLbl ++ ":"
     modify $ \s -> s { constMap = originalConstMap }
-    
-    (elseReturns, constMapAfterElse) <- case elseStmt of
-        Just stmt -> do
-            r <- genStmt stmt
+    (returnedInElse, constMapAfterElse) <- case elseStmt of
+        Just s -> do
+            emit $ FLabel elseLbl
+            returned <- genStmt s
             cm <- gets constMap
-            return (r, cm)
+            unless returned $ emit $ FTerm $ Goto endLbl
+            return (returned, cm)
         Nothing -> return (False, originalConstMap)
 
-    unless (thenReturns && elseReturns) $ emit $ endLbl ++ ":"
     let finalConstMap = Map.filterWithKey (\k v -> Map.lookup k constMapAfterElse == Just v) constMapAfterThen
     modify $ \s -> s { constMap = finalConstMap }
-    
-    return (thenReturns && elseReturns)
 
-genStmt (While cond body _) = do
+    unless (returnedInThen && returnedInElse) $ emit $ FLabel endLbl
+    return (returnedInThen && returnedInElse)
+
+genStmt (AST.While cond body _) = do
     startLbl <- freshLabel "while_start_"
+    bodyLbl <- freshLabel "while_body_"
     endLbl <- freshLabel "while_end_"
-    let bodyModified = findModifiedVars body
-    mapM_ clearConst bodyModified
+
+    mapM_ clearConst (findModifiedVars body)
     
     pushLoopLabels endLbl startLbl
-    
-    emit $ startLbl ++ ":"
+    emit $ FTerm $ Goto startLbl
+    emit $ FLabel startLbl
     condReg <- genExpr cond
-    emit $ "if " ++ regName condReg ++ " == 0 goto " ++ endLbl
+    emit $ FTerm $ CondGoto condReg endLbl bodyLbl
+    emit $ FLabel bodyLbl
     
-    _ <- genStmt body
-    emit $ "goto " ++ startLbl
-    emit $ endLbl ++ ":"
-    
+    bodyReturns <- genStmt body
+    unless bodyReturns $ emit $ FTerm $ Goto startLbl
+
+    emit $ FLabel endLbl
     popLoopLabels
     return False
 
-genStmt (For maybeInit maybeCond maybeStep body _) = do
+genStmt (AST.For maybeInit maybeCond maybeStep body _) = do
     startLbl <- freshLabel "for_start_"
+    bodyLbl <- freshLabel "for_body_"
     stepLbl <- freshLabel "for_step_"
     endLbl <- freshLabel "for_end_"
+
     case maybeInit of
         Just initStmt -> void $ genStmt initStmt
         Nothing -> return ()
-    let bodyModified = maybe [] findModifiedVars maybeStep ++ findModifiedVars body
-    mapM_ clearConst bodyModified
+
+    let modifiedInLoop = findModifiedVars body ++ maybe [] findModifiedVars maybeStep
+    mapM_ clearConst modifiedInLoop
+
     pushLoopLabels endLbl stepLbl
-    emit $ startLbl ++ ":"
+    emit $ FTerm $ Goto startLbl
+    emit $ FLabel startLbl
     case maybeCond of
         Just condExpr -> do
             condReg <- genExpr condExpr
-            emit $ "if " ++ regName condReg ++ " == 0 goto " ++ endLbl
-        Nothing -> return ()
-    void $ genStmt body
-    case maybeStep of
-        Just _ -> emit $ "goto " ++ stepLbl
-        Nothing -> return ()
-    emit $ stepLbl ++ ":"
-    case maybeStep of
-        Just stepStmt -> void $ genStmt stepStmt
-        Nothing -> return ()
-    emit $ "goto " ++ startLbl
-    emit $ endLbl ++ ":"
+            emit $ FTerm $ CondGoto condReg endLbl bodyLbl
+        Nothing -> emit (FTerm (Goto bodyLbl))
+    emit $ FLabel bodyLbl
+    
+    bodyReturns <- genStmt body
+    unless bodyReturns $ emit $ FTerm $ Goto stepLbl
+
+    emit $ FLabel stepLbl
+    stepReturns <- case maybeStep of
+        Just stepStmt -> genStmt stepStmt
+        Nothing -> return False
+    unless stepReturns $ emit $ FTerm $ Goto startLbl
+
+    emit $ FLabel endLbl
     popLoopLabels
     return False
 
-genStmt (Break _) = do
-    labels <- gets breakLabels
-    case labels of
-        (lbl:_) -> emit $ "goto " ++ lbl
-        [] -> error "Break outside of loop"
-    return False
-
-genStmt (Continue _) = do
-    labels <- gets continueLabels
-    case labels of
-        (lbl:_) -> emit $ "goto " ++ lbl
-        [] -> error "Continue outside of loop"
-    return False
-
-genStmt (BlockStmt stmts _) = do
-    genBlock stmts
-    return False
+genStmt (AST.Break _) = gets breakLabels >>= \ls -> case ls of (l:_) -> emit (FTerm $ Goto l) >> return True; [] -> error "Break outside loop"
+genStmt (AST.Continue _) = gets continueLabels >>= \ls -> case ls of (l:_) -> emit (FTerm $ Goto l) >> return True; [] -> error "Continue outside loop"
+genStmt (AST.BlockStmt stmts _) = genBlock stmts
 
 toInt32 :: Integer -> Integer
-toInt32 x =
-    let w = x .&. 0xffffffff
-     in if w >= 0x80000000 then w - 0x100000000 else w
+toInt32 x = let w = x .&. 0xffffffff in if w >= 0x80000000 then w - 0x100000000 else w
 
-constEval :: Expr -> CodeGen (Maybe Integer)
-constEval (IntExpr s _) =
-    case parseNumber s of
-        Left _ -> return Nothing
-        Right v -> return (Just (toInt32 v))
-
-constEval (BoolExpr b _) = return (Just (if b then 1 else 0))
-
-constEval (Ident name _) = gets (Map.lookup name . constMap)
-
-constEval (UnExpr Neg e) = do
-    me <- constEval e
-    return (toInt32 . negate <$> me)
-
-constEval (UnExpr Not e) = do
-    me <- constEval e
-    return ((\v -> if v == 0 then 1 else 0) <$> me)
-
-constEval (UnExpr BitNot e) = do
-    me <- constEval e
-    return (toInt32 . complement <$> me)
-
-constEval (UnExpr _ _) = return Nothing
-
-constEval (BinExpr op l r) = do
+constEval :: AST.Expr -> CodeGen (Maybe Integer)
+constEval (AST.IntExpr s _) = case parseNumber s of Left _ -> return Nothing; Right v -> return (Just (toInt32 v))
+constEval (AST.BoolExpr b _) = return (Just (if b then 1 else 0))
+constEval (AST.Ident name _) = gets (Map.lookup name . constMap)
+constEval (AST.UnExpr op e) = fmap (constEval' op) (constEval e)
+    where constEval' Neg (Just v) = Just $ toInt32 (negate v)
+          constEval' Not (Just v) = Just $ if v == 0 then 1 else 0
+          constEval' BitNot (Just v) = Just $ toInt32 (complement v)
+          constEval' _ _ = Nothing
+constEval (AST.BinExpr op l r) = do
     ml <- constEval l
     mr <- constEval r
     return $ case (ml, mr) of
-        (Just v1, Just v2) ->
-            case op of
-                Add -> Just $ toInt32 (v1 + v2)
-                Sub -> Just $ toInt32 (v1 - v2)
-                Mul -> Just $ toInt32 (v1 * v2)
-                Div -> Nothing
-                Mod -> Nothing
-                Lt -> Just $ if v1 < v2 then 1 else 0
-                Le -> Just $ if v1 <= v2 then 1 else 0
-                Gt -> Just $ if v1 > v2 then 1 else 0
-                Ge -> Just $ if v1 >= v2 then 1 else 0
-                Eq -> Just $ if v1 == v2 then 1 else 0
-                Ne -> Just $ if v1 /= v2 then 1 else 0
-                And -> Just $ if v1 /= 0 && v2 /= 0 then 1 else 0
-                Or -> Just $ if v1 /= 0 || v2 /= 0 then 1 else 0
-                BitAnd -> Just $ toInt32 (v1 .&. v2)
-                BitOr -> Just $ toInt32 (v1 .|. v2)
-                BitXor -> Just $ toInt32 (v1 `xor` v2)
-                Shl -> Just $ toInt32 (v1 `shiftL` fromIntegral (v2 .&. 0x1f))
-                Shr -> Just $ toInt32 (v1 `shiftR` fromIntegral (v2 .&. 0x1f))
-                _ -> Nothing
+        (Just v1, Just v2) -> case op of
+            Add -> Just $ toInt32 (v1 + v2)
+            Sub -> Just $ toInt32 (v1 - v2)
+            Mul -> Just $ toInt32 (v1 * v2)
+            Lt -> Just $ if v1 < v2 then 1 else 0
+            Le -> Just $ if v1 <= v2 then 1 else 0
+            Gt -> Just $ if v1 > v2 then 1 else 0
+            Ge -> Just $ if v1 >= v2 then 1 else 0
+            Eq -> Just $ if v1 == v2 then 1 else 0
+            Ne -> Just $ if v1 /= v2 then 1 else 0
+            And -> Just $ if v1 /= 0 && v2 /= 0 then 1 else 0
+            Or -> Just $ if v1 /= 0 || v2 /= 0 then 1 else 0
+            BitAnd -> Just $ toInt32 (v1 .&. v2)
+            BitOr -> Just $ toInt32 (v1 .|. v2)
+            BitXor -> Just $ toInt32 (v1 `xor` v2)
+            -- Mask shift amounts to 5 bits to match x86 behavior
+            Shl -> Just $ toInt32 (v1 `shiftL` (fromInteger v2 .&. 31))
+            Shr -> Just $ toInt32 (v1 `shiftR` (fromInteger v2 .&. 31))
+            _ -> Nothing
         _ -> Nothing
-
-constEval (TernaryExpr cond thenExpr elseExpr _) = do
-    mc <- constEval cond
+constEval (AST.TernaryExpr c t e _) = do
+    mc <- constEval c
     case mc of
-        Just c -> if c /= 0 
-                  then constEval thenExpr 
-                  else constEval elseExpr
-        Nothing -> return Nothing
+      Just 0 -> constEval e
+      Just _ -> constEval t
+      Nothing -> return Nothing
 
-genExpr :: Expr -> CodeGen Register
-genExpr (IntExpr s _) =
-    case parseNumber s of
-        Left err -> error err
-        Right v -> do
-            r <- freshReg
-            emit $ regName r ++ " = " ++ show (toInt32 v)
-            return r
+genExpr :: AST.Expr -> CodeGen Register
+genExpr e = do
+    me <- constEval e
+    case me of
+        Just v -> freshReg >>= \r -> emit (FInstr $ AAsmLoadImm r v) >> return r
+        Nothing -> genExprNoConst e
 
-genExpr (BoolExpr b _) = do
+genExprNoConst :: AST.Expr -> CodeGen Register
+genExprNoConst (AST.BinExpr AST.And e1 e2) = genAnd e1 e2
+genExprNoConst (AST.BinExpr AST.Or e1 e2) = genOr e1 e2
+genExprNoConst (AST.BinExpr op e1 e2) = do
+    r1 <- genExpr e1
+    r2 <- genExpr e2
     r <- freshReg
-    emit $ regName r ++ " = " ++ if b then "1" else "0"
+    emit $ FInstr $ AAsmBinOp op r r1 r2
     return r
-
-genExpr (Ident name _) = lookupVar name
-
-genExpr (UnExpr op e) = do
+genExprNoConst (AST.Ident name _) = lookupVar name
+genExprNoConst (AST.UnExpr op e) = do
     r1 <- genExpr e
     r <- freshReg
-    emit $ regName r ++ " = " ++ show op ++ " " ++ regName r1
+    emit $ FInstr $ AAsmUnOp op r r1
     return r
-
-genExpr (BinExpr op e1 e2) = case op of
-    And -> genAnd e1 e2
-    Or  -> genOr e1 e2
-    _   -> do
-        r1 <- genExpr e1
-        r2 <- genExpr e2
-        r <- freshReg
-        emit $ regName r ++ " = " ++ regName r1 ++ " " ++ show op ++ " " ++ regName r2
-        return r
-
-genExpr (TernaryExpr cond thenExpr elseExpr _) = do
+genExprNoConst (AST.TernaryExpr cond thenExpr elseExpr _) = do
     condReg <- genExpr cond
     thenLbl <- freshLabel "ternary_then_"
     elseLbl <- freshLabel "ternary_else_"
     endLbl <- freshLabel "ternary_end_"
     resultReg <- freshReg
-    
-    emit $ "if " ++ regName condReg ++ " == 0 goto " ++ elseLbl
-    
-    emit $ thenLbl ++ ":"
+    emit $ FTerm $ CondGoto condReg elseLbl thenLbl
+    emit $ FLabel thenLbl
     thenReg <- genExpr thenExpr
-    emit $ regName resultReg ++ " = " ++ regName thenReg
-    emit $ "goto " ++ endLbl
-    
-    emit $ elseLbl ++ ":"
+    emit $ FInstr $ AAsmMove resultReg thenReg
+    emit $ FTerm $ Goto endLbl
+    emit $ FLabel elseLbl
     elseReg <- genExpr elseExpr
-    emit $ regName resultReg ++ " = " ++ regName elseReg
-    
-    emit $ endLbl ++ ":"
+    emit $ FInstr $ AAsmMove resultReg elseReg
+    emit $ FLabel endLbl
     return resultReg
+genExprNoConst e = error $ "genExprNoConst called on an expression that should not be here: " ++ show e
 
-genAnd :: Expr -> Expr -> CodeGen Register
+genAnd :: AST.Expr -> AST.Expr -> CodeGen Register
 genAnd e1 e2 = do
     resultReg <- freshReg
+    rhsLbl <- freshLabel "and_rhs_"
     falseLbl <- freshLabel "and_false_"
     endLbl <- freshLabel "and_end_"
 
     r1 <- genExpr e1
-    emit $ "if " ++ regName r1 ++ " == 0 goto " ++ falseLbl
+    emit $ FTerm $ CondGoto r1 falseLbl rhsLbl
 
+    emit $ FLabel rhsLbl
     r2 <- genExpr e2
-    emit $ "if " ++ regName r2 ++ " == 0 goto " ++ falseLbl
+    emit $ FInstr $ AAsmMove resultReg r2
+    emit $ FTerm $ Goto endLbl
 
-    emit $ regName resultReg ++ " = 1"
-    emit $ "goto " ++ endLbl
+    emit $ FLabel falseLbl
+    emit $ FInstr $ AAsmLoadImm resultReg 0
+    emit $ FTerm $ Goto endLbl
 
-    emit $ falseLbl ++ ":"
-    emit $ regName resultReg ++ " = 0"
-
-    emit $ endLbl ++ ":"
+    emit $ FLabel endLbl
     return resultReg
 
-genOr :: Expr -> Expr -> CodeGen Register
+genOr :: AST.Expr -> AST.Expr -> CodeGen Register
 genOr e1 e2 = do
     resultReg <- freshReg
-    checkRhsLbl <- freshLabel "or_rhs_"
+    rhsLbl <- freshLabel "or_rhs_"
     trueLbl <- freshLabel "or_true_"
-    falseLbl <- freshLabel "or_false_"
     endLbl <- freshLabel "or_end_"
 
     r1 <- genExpr e1
-    emit $ "if " ++ regName r1 ++ " == 0 goto " ++ checkRhsLbl
-    emit $ "goto " ++ trueLbl
+    emit $ FTerm $ CondGoto r1 rhsLbl trueLbl
 
-    emit $ checkRhsLbl ++ ":"
+    emit $ FLabel rhsLbl
     r2 <- genExpr e2
-    emit $ "if " ++ regName r2 ++ " == 0 goto " ++ falseLbl
-    emit $ "goto " ++ trueLbl
+    emit $ FInstr $ AAsmMove resultReg r2
+    emit $ FTerm $ Goto endLbl
 
-    emit $ falseLbl ++ ":"
-    emit $ regName resultReg ++ " = 0"
-    emit $ "goto " ++ endLbl
+    emit $ FLabel trueLbl
+    emit $ FInstr $ AAsmLoadImm resultReg 1
+    emit $ FTerm $ Goto endLbl
 
-    emit $ trueLbl ++ ":"
-    emit $ regName resultReg ++ " = 1"
-
-    emit $ endLbl ++ ":"
+    emit $ FLabel endLbl
     return resultReg
 
-
-varUsedInExpr :: String -> Expr -> Bool
-varUsedInExpr name (Ident n _) = name == n
-varUsedInExpr name (BinExpr _ e1 e2) = varUsedInExpr name e1 || varUsedInExpr name e2
-varUsedInExpr name (UnExpr _ e) = varUsedInExpr name e
-varUsedInExpr name (TernaryExpr e1 e2 e3 _) = varUsedInExpr name e1 || varUsedInExpr name e2 || varUsedInExpr name e3
-varUsedInExpr _ _ = False
-
-findModifiedVars :: Stmt -> [String]
-findModifiedVars (Asgn name _ _ _) = [name]
-findModifiedVars (Init _ name _ _) = [name]
-findModifiedVars (If _ thenStmt elseStmt _) = 
-    findModifiedVars thenStmt ++ maybe [] findModifiedVars elseStmt  
-findModifiedVars (While _ body _) = findModifiedVars body
-findModifiedVars (For _ _ _ body _) = findModifiedVars body
-findModifiedVars (BlockStmt stmts _) = concatMap findModifiedVars stmts
+findModifiedVars :: AST.Stmt -> [String]
+findModifiedVars (AST.Asgn name _ _ _) = [name]
+findModifiedVars (AST.Init _ name _ _) = [name]
+findModifiedVars (AST.If _ thenS elseS _) = findModifiedVars thenS ++ maybe [] findModifiedVars elseS
+findModifiedVars (AST.While _ body _) = findModifiedVars body
+findModifiedVars (AST.For _ _ stepS body _) = maybe [] findModifiedVars stepS ++ findModifiedVars body
+findModifiedVars (AST.BlockStmt stmts _) = concatMap findModifiedVars stmts
 findModifiedVars _ = []

@@ -35,6 +35,9 @@ executable c0haskell
                   Compile.Semantic,
                   Compile.AAsm,
                   Compile.X86,
+                  Compile.Liveness,
+                  Compile.Interference,
+                  Compile.Coloring,
                   Error
     hs-source-dirs:   app
     default-language: Haskell2010
